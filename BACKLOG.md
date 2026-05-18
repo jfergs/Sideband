@@ -6,10 +6,14 @@ radio design work here; roll up only cross-project dependencies to
 
 ## Current State
 
-- Repository is an early planning workspace.
-- README defines the project scope around off-grid communications, mesh
-  networking, and field-radio workflows.
-- Architecture and implementation notes are still placeholders.
+- Repository has moved from planning placeholder to initial implementation
+  scaffold.
+- README defines the project around the TH-D75 class Bluetooth bridge and BLE
+  mobile transport.
+- Architecture notes define Bluetooth Classic SPP, BLE UART, KISS relay, privacy
+  defaults, and future expansion boundaries.
+- Repository structure, contribution files, license, hardware/protocol notes,
+  developer setup notes, and the first PlatformIO firmware scaffold are present.
 - Initial direction is a portable RF bridge and packet middleware for Kenwood
   TH-D75 class radios.
   - Core transport: ESP32 Bluetooth Classic SPP to radio.

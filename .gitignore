@@ -5,3 +5,11 @@ __pycache__/
 .venv/
 .env
 .pio/
+.pioenvs/
+.piolibdeps/
+.clang_complete
+.gcc-flags.json
+compile_commands.json
+firmware/**/.pio/
+firmware/**/.vscode/
+firmware/**/include/secrets.h
