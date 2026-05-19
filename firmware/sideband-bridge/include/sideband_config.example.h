@@ -5,5 +5,7 @@
 
 #define SIDEBAND_DEVICE_NAME "Sideband Bridge"
 #define SIDEBAND_BLE_NAME "Sideband BLE"
+#define SIDEBAND_BLE_MANUFACTURER "Sideband"
+#define SIDEBAND_BLE_MODEL "Sideband Bridge"
 #define SIDEBAND_RADIO_NAME_HINT "TH-D75"
 #define SIDEBAND_SERIAL_BAUD 115200
