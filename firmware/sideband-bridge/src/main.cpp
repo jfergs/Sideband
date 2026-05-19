@@ -1,9 +1,8 @@
 #include <Arduino.h>
 #include <BluetoothSerial.h>
 #include <NimBLEDevice.h>
-#ifdef SIDEBAND_IOS_DISCOVERY_HID
 #include <NimBLEHIDDevice.h>
-#endif
+#include <Preferences.h>
 #ifdef SIDEBAND_HAS_TFT
 #include <TFT_eSPI.h>
 #endif
@@ -19,6 +18,7 @@ namespace {
 BluetoothSerial radioSerial;
 NimBLEServer *bleServer = nullptr;
 NimBLECharacteristic *bleTx = nullptr;
+Preferences preferences;
 #ifdef SIDEBAND_HAS_TFT
 TFT_eSPI tft;
 #endif
@@ -37,6 +37,8 @@ constexpr uint8_t BUTTON_NEXT_PIN = 0;
 constexpr uint8_t BUTTON_SELECT_PIN = 35;
 constexpr uint32_t BUTTON_DEBOUNCE_MS = 45;
 constexpr uint32_t DISPLAY_REFRESH_MS = 250;
+constexpr char SETTINGS_NAMESPACE[] = "sideband";
+constexpr char ACTIVE_MODE_KEY[] = "mode";
 
 uint32_t radioToBleCount = 0;
 uint32_t bleToRadioCount = 0;
@@ -47,10 +49,13 @@ enum class ClientMode : uint8_t {
   Ble,
   Usb,
   Wifi,
+  IosDiscovery,
 };
 
 ClientMode selectedMode = ClientMode::Ble;
 ClientMode activeMode = ClientMode::Ble;
+
+void renderDisplay();
 
 const char *modeName(ClientMode mode) {
   switch (mode) {
@@ -60,8 +65,21 @@ const char *modeName(ClientMode mode) {
       return "USB-C";
     case ClientMode::Wifi:
       return "Wi-Fi";
+    case ClientMode::IosDiscovery:
+      return "iOS DISC";
   }
   return "?";
+}
+
+bool modeUsesBle(ClientMode mode) {
+  return mode == ClientMode::Ble || mode == ClientMode::IosDiscovery;
+}
+
+const char *bleStatusName() {
+  if (!modeUsesBle(activeMode)) {
+    return "off";
+  }
+  return bleConnected ? "connected" : "advertising";
 }
 
 ClientMode nextMode(ClientMode mode) {
@@ -71,9 +89,36 @@ ClientMode nextMode(ClientMode mode) {
     case ClientMode::Usb:
       return ClientMode::Wifi;
     case ClientMode::Wifi:
+      return ClientMode::IosDiscovery;
+    case ClientMode::IosDiscovery:
       return ClientMode::Ble;
   }
   return ClientMode::Ble;
+}
+
+ClientMode modeFromValue(uint8_t value) {
+  switch (value) {
+    case static_cast<uint8_t>(ClientMode::Ble):
+      return ClientMode::Ble;
+    case static_cast<uint8_t>(ClientMode::Usb):
+      return ClientMode::Usb;
+    case static_cast<uint8_t>(ClientMode::Wifi):
+      return ClientMode::Wifi;
+    case static_cast<uint8_t>(ClientMode::IosDiscovery):
+      return ClientMode::IosDiscovery;
+    default:
+      return ClientMode::Ble;
+  }
+}
+
+void loadActiveMode() {
+  preferences.begin(SETTINGS_NAMESPACE, false);
+  activeMode = modeFromValue(preferences.getUChar(ACTIVE_MODE_KEY, static_cast<uint8_t>(ClientMode::Ble)));
+  selectedMode = activeMode;
+}
+
+void saveActiveMode(ClientMode mode) {
+  preferences.putUChar(ACTIVE_MODE_KEY, static_cast<uint8_t>(mode));
 }
 
 class ServerCallbacks : public NimBLEServerCallbacks {
@@ -109,7 +154,6 @@ class RxCallbacks : public NimBLECharacteristicCallbacks {
   }
 };
 
-#ifdef SIDEBAND_IOS_DISCOVERY_HID
 void setupHidDiscoveryProfile() {
   static uint8_t keyboardReportMap[] = {
       0x05, 0x01,  // Usage Page (Generic Desktop)
@@ -146,7 +190,6 @@ void setupHidDiscoveryProfile() {
   hid.setReportMap(keyboardReportMap, sizeof(keyboardReportMap));
   hid.getInputReport(1);
 }
-#endif
 
 void setupBle() {
   NimBLEDevice::deinit(true);
@@ -167,23 +210,23 @@ void setupBle() {
 
   bleRx->setCallbacks(new RxCallbacks());
 
-#ifdef SIDEBAND_IOS_DISCOVERY_HID
-  setupHidDiscoveryProfile();
-#else
-  NimBLEService *deviceInfoService = bleServer->createService(BLE_DEVICE_INFO_SERVICE_UUID);
-  NimBLECharacteristic *manufacturer = deviceInfoService->createCharacteristic(
-      BLE_MANUFACTURER_UUID,
-      NIMBLE_PROPERTY::READ);
-  NimBLECharacteristic *model = deviceInfoService->createCharacteristic(
-      BLE_MODEL_UUID,
-      NIMBLE_PROPERTY::READ);
-  NimBLECharacteristic *firmware = deviceInfoService->createCharacteristic(
-      BLE_FIRMWARE_UUID,
-      NIMBLE_PROPERTY::READ);
-  manufacturer->setValue(SIDEBAND_BLE_MANUFACTURER);
-  model->setValue(SIDEBAND_BLE_MODEL);
-  firmware->setValue(SIDEBAND_VERSION);
-#endif
+  if (activeMode == ClientMode::IosDiscovery) {
+    setupHidDiscoveryProfile();
+  } else {
+    NimBLEService *deviceInfoService = bleServer->createService(BLE_DEVICE_INFO_SERVICE_UUID);
+    NimBLECharacteristic *manufacturer = deviceInfoService->createCharacteristic(
+        BLE_MANUFACTURER_UUID,
+        NIMBLE_PROPERTY::READ);
+    NimBLECharacteristic *model = deviceInfoService->createCharacteristic(
+        BLE_MODEL_UUID,
+        NIMBLE_PROPERTY::READ);
+    NimBLECharacteristic *firmware = deviceInfoService->createCharacteristic(
+        BLE_FIRMWARE_UUID,
+        NIMBLE_PROPERTY::READ);
+    manufacturer->setValue(SIDEBAND_BLE_MANUFACTURER);
+    model->setValue(SIDEBAND_BLE_MODEL);
+    firmware->setValue(SIDEBAND_VERSION);
+  }
 
   NimBLEAdvertising *advertising = NimBLEDevice::getAdvertising();
   NimBLEAdvertisementData advertisementData;
@@ -191,13 +234,13 @@ void setupBle() {
 
   advertisementData.setFlags(BLE_HS_ADV_F_DISC_GEN);
   advertisementData.setName(BLE_SHORT_ADVERTISED_NAME);
-#ifdef SIDEBAND_IOS_DISCOVERY_HID
-  advertisementData.setAppearance(HID_KEYBOARD);
-  advertisementData.setCompleteServices16({NimBLEUUID(BLE_HID_SERVICE_UUID)});
-#else
-  advertisementData.setAppearance(BLE_APPEARANCE_GENERIC_COMPUTER);
-  advertisementData.setCompleteServices(NimBLEUUID(BLE_SERVICE_UUID));
-#endif
+  if (activeMode == ClientMode::IosDiscovery) {
+    advertisementData.setAppearance(HID_KEYBOARD);
+    advertisementData.setCompleteServices16({NimBLEUUID(BLE_HID_SERVICE_UUID)});
+  } else {
+    advertisementData.setAppearance(BLE_APPEARANCE_GENERIC_COMPUTER);
+    advertisementData.setCompleteServices(NimBLEUUID(BLE_SERVICE_UUID));
+  }
   scanResponseData.setName(SIDEBAND_BLE_NAME);
 
   advertising->setAdvertisementData(advertisementData);
@@ -235,7 +278,11 @@ void handleButtons() {
 
   if (buttonPressed(BUTTON_SELECT_PIN, selectStable, selectChangedMs)) {
     activeMode = selectedMode;
+    saveActiveMode(activeMode);
     displayDirty = true;
+    Serial.printf("SIDEBAND saved mode=%s restarting\n", modeName(activeMode));
+    delay(250);
+    ESP.restart();
   }
 }
 
@@ -269,7 +316,9 @@ void renderDisplay() {
   drawLabel(6, 58, "ACTIVE", modeName(activeMode), TFT_YELLOW);
   drawLabel(86, 58, "SELECT", modeName(selectedMode), TFT_ORANGE);
 
-  drawLabel(6, 98, "BLE", bleConnected ? "CONNECTED" : "ADVERTISING", bleConnected ? TFT_GREEN : TFT_CYAN);
+  const bool bleMode = modeUsesBle(activeMode);
+  drawLabel(6, 98, "BLE", bleMode ? (bleConnected ? "CONNECTED" : "ADVERTISING") : "OFF",
+            bleMode ? (bleConnected ? TFT_GREEN : TFT_CYAN) : TFT_DARKGREY);
 
   char counts[32];
   snprintf(counts, sizeof(counts), "RX %lu TX %lu",
@@ -336,7 +385,7 @@ void printStatus() {
       modeName(selectedMode),
       BLE_SHORT_ADVERTISED_NAME,
       SIDEBAND_BLE_NAME,
-      bleConnected ? "connected" : "advertising",
+      bleStatusName(),
       static_cast<unsigned long>(radioToBleCount),
       static_cast<unsigned long>(bleToRadioCount));
 }
@@ -348,6 +397,7 @@ void setup() {
   delay(300);
 
   Serial.println("SIDEBAND boot");
+  loadActiveMode();
   setupButtons();
   setupDisplay();
 #ifdef SIDEBAND_BLE_ONLY
@@ -355,11 +405,14 @@ void setup() {
 #else
   Serial.println("Primary bridge target: Bluetooth Classic capable ESP32");
 
-  if (activeMode != ClientMode::Ble) {
+  if (activeMode == ClientMode::Ble) {
     radioSerial.begin(SIDEBAND_DEVICE_NAME, true);
   }
 #endif
-  setupBle();
+
+  if (modeUsesBle(activeMode)) {
+    setupBle();
+  }
 }
 
 void loop() {
