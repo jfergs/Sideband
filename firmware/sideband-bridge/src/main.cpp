@@ -287,15 +287,51 @@ void handleButtons() {
 }
 
 #ifdef SIDEBAND_HAS_TFT
-void drawLabel(int16_t x, int16_t y, const char *label, const char *value, uint16_t color) {
+void drawStaticLabel(int16_t x, int16_t y, const char *label) {
   tft.setTextColor(TFT_DARKGREY, TFT_BLACK);
   tft.drawString(label, x, y, 2);
+}
+
+void drawValueField(int16_t x, int16_t y, int16_t width, const char *value, const char *previous, uint16_t color) {
+  if (strcmp(value, previous) == 0) {
+    return;
+  }
+
+  tft.fillRect(x, y, width, 18, TFT_BLACK);
   tft.setTextColor(color, TFT_BLACK);
-  tft.drawString(value, x, y + 16, 2);
+  tft.drawString(value, x, y, 2);
+}
+
+void copyPreviousValue(char *target, size_t targetSize, const char *value) {
+  strncpy(target, value, targetSize - 1);
+  target[targetSize - 1] = '\0';
+}
+
+void drawDisplayFrame() {
+  tft.fillScreen(TFT_BLACK);
+  tft.setTextDatum(TL_DATUM);
+  tft.setTextColor(TFT_CYAN, TFT_BLACK);
+  tft.drawString("SIDEBAND", 6, 4, 4);
+
+  drawStaticLabel(6, 34, "ADV");
+  drawStaticLabel(6, 58, "ACTIVE");
+  drawStaticLabel(86, 58, "SELECT");
+  drawStaticLabel(6, 98, "BLE");
+  drawStaticLabel(6, 138, "COUNTERS");
+
+  tft.setTextColor(TFT_DARKGREY, TFT_BLACK);
+  tft.drawString("BTN1 next", 6, 202, 2);
+  tft.drawString("BTN2 select", 6, 220, 2);
 }
 
 void renderDisplay() {
   static uint32_t lastDrawMs = 0;
+  static bool frameDrawn = false;
+  static char previousAdvertisedName[16] = "";
+  static char previousActiveMode[16] = "";
+  static char previousSelectedMode[16] = "";
+  static char previousBleStatus[16] = "";
+  static char previousCounters[32] = "";
   uint32_t now = millis();
   if (!displayDirty && now - lastDrawMs < DISPLAY_REFRESH_MS) {
     return;
@@ -303,32 +339,31 @@ void renderDisplay() {
   displayDirty = false;
   lastDrawMs = now;
 
-  tft.fillScreen(TFT_BLACK);
-  tft.setTextDatum(TL_DATUM);
-  tft.setTextColor(TFT_CYAN, TFT_BLACK);
-  tft.drawString("SIDEBAND", 6, 4, 4);
+  if (!frameDrawn) {
+    drawDisplayFrame();
+    frameDrawn = true;
+  }
 
-  tft.setTextColor(TFT_WHITE, TFT_BLACK);
-  tft.drawString("ADV", 6, 34, 2);
-  tft.setTextColor(TFT_GREEN, TFT_BLACK);
-  tft.drawString(BLE_SHORT_ADVERTISED_NAME, 50, 34, 2);
+  drawValueField(50, 34, 80, BLE_SHORT_ADVERTISED_NAME, previousAdvertisedName, TFT_GREEN);
+  copyPreviousValue(previousAdvertisedName, sizeof(previousAdvertisedName), BLE_SHORT_ADVERTISED_NAME);
 
-  drawLabel(6, 58, "ACTIVE", modeName(activeMode), TFT_YELLOW);
-  drawLabel(86, 58, "SELECT", modeName(selectedMode), TFT_ORANGE);
+  drawValueField(6, 74, 72, modeName(activeMode), previousActiveMode, TFT_YELLOW);
+  copyPreviousValue(previousActiveMode, sizeof(previousActiveMode), modeName(activeMode));
 
-  const bool bleMode = modeUsesBle(activeMode);
-  drawLabel(6, 98, "BLE", bleMode ? (bleConnected ? "CONNECTED" : "ADVERTISING") : "OFF",
-            bleMode ? (bleConnected ? TFT_GREEN : TFT_CYAN) : TFT_DARKGREY);
+  drawValueField(86, 74, 110, modeName(selectedMode), previousSelectedMode, TFT_ORANGE);
+  copyPreviousValue(previousSelectedMode, sizeof(previousSelectedMode), modeName(selectedMode));
+
+  const char *bleStatus = modeUsesBle(activeMode) ? (bleConnected ? "CONNECTED" : "ADVERTISING") : "OFF";
+  uint16_t bleColor = modeUsesBle(activeMode) ? (bleConnected ? TFT_GREEN : TFT_CYAN) : TFT_DARKGREY;
+  drawValueField(6, 114, 148, bleStatus, previousBleStatus, bleColor);
+  copyPreviousValue(previousBleStatus, sizeof(previousBleStatus), bleStatus);
 
   char counts[32];
   snprintf(counts, sizeof(counts), "RX %lu TX %lu",
            static_cast<unsigned long>(bleToRadioCount),
            static_cast<unsigned long>(radioToBleCount));
-  drawLabel(6, 138, "COUNTERS", counts, TFT_WHITE);
-
-  tft.setTextColor(TFT_DARKGREY, TFT_BLACK);
-  tft.drawString("BTN1 next", 6, 202, 2);
-  tft.drawString("BTN2 select", 6, 220, 2);
+  drawValueField(6, 154, 148, counts, previousCounters, TFT_WHITE);
+  copyPreviousValue(previousCounters, sizeof(previousCounters), counts);
 }
 
 void setupDisplay() {
@@ -338,6 +373,7 @@ void setupDisplay() {
   tft.init();
   tft.setRotation(1);
   tft.invertDisplay(true);
+  tft.fillScreen(TFT_BLACK);
   displayDirty = true;
   Serial.println("SIDEBAND display ready");
 }

@@ -101,6 +101,15 @@ radio design work here; roll up only cross-project dependencies to
     indicators, packet counters, battery status hooks, and low-refresh
     avionics-style layout.
 
+- `SB-023` Fix TFT refresh flicker.
+  - Investigate visible flicker during status screen refresh on TTGO T-Display.
+  - Compare against the Waveshare ESP32-C6 display refresh issue pattern from
+    related projects.
+  - Replace full-screen redraws with dirty-region, sprite, or partial update
+    rendering where practical.
+  - Preserve low-refresh field readability while avoiding distracting screen
+    flash during normal status updates.
+
 - `SB-030` Implement Bluetooth Classic radio transport.
   - Discover, pair with, and connect to a TH-D75 class radio over SPP.
   - Maintain stable connection, detect disconnects, and auto-reconnect.
