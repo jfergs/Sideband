@@ -2,8 +2,8 @@
 
 Sideband is a portable RF bridge and packet middleware project for Kenwood
 TH-D75 class radios. The first target is an original ESP32 bridge that connects
-to the radio over Bluetooth Classic SPP and exposes a BLE UART service for
-iPhone and mobile packet applications.
+to the radio over Bluetooth Classic SPP and exposes USB-C serial or Wi-Fi TCP
+transport for iPhone and mobile packet applications.
 
 The project favors small, field-readable tools: stable transports, visible link
 state, conservative packet handling, and diagnostics that do not leak payloads
@@ -12,12 +12,11 @@ or private operator identifiers by default.
 ## Project Scope
 
 - TH-D75 class Bluetooth Classic SPP radio bridge.
-- BLE UART / Nordic UART Service compatible mobile transport.
+- USB-C serial and Wi-Fi TCP mobile transport.
 - KISS framing, transparent packet relay, and packet counters.
 - Low-refresh instrumentation UI for supported ESP32 display boards.
 - Hardware compatibility notes for Bluetooth Classic capable ESP32 boards.
-- Future Wi-Fi TCP KISS, MQTT telemetry, Reticulum, Meshtastic, and TAK
-  integration research.
+- Future MQTT telemetry, Reticulum, Meshtastic, and TAK integration research.
 
 ## Architecture
 
@@ -25,14 +24,14 @@ or private operator identifiers by default.
 TH-D75 class radio
   <-> Bluetooth Classic SPP
   <-> Sideband ESP32 bridge
-  <-> BLE UART / Nordic UART Service
+  <-> USB-C serial or Wi-Fi TCP
   <-> iPhone or mobile packet app
 ```
 
 The primary bridge requires Bluetooth Classic. ESP32-S3, ESP32-C3, and ESP32-C6
-support BLE but not Bluetooth Classic, so they are not suitable for the first
-radio bridge. They may still be useful later as display, companion, or telemetry
-nodes.
+do not support Bluetooth Classic, so they are not suitable for the first radio
+bridge. They may still be useful later as display, companion, or telemetry
+nodes when paired with a Classic-capable bridge.
 
 ## Hardware Direction
 
@@ -85,7 +84,7 @@ the repo. If local experiments need private values, copy
 
 ## Status
 
-Early implementation scaffold. The current firmware advertises a BLE UART
-service and initializes Bluetooth Classic SPP, but radio pairing, KISS framing,
-persistent storage, TFT UI, and end-to-end TH-D75 validation are still backlog
-items.
+Early implementation scaffold. The current firmware initializes Bluetooth
+Classic SPP, exposes USB-C serial and Wi-Fi TCP client paths, stores radio
+target settings in Preferences, and renders the TFT status UI. KISS framing
+hardening and end-to-end TH-D75 validation remain active backlog items.

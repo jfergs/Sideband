@@ -1,8 +1,7 @@
 #include <Arduino.h>
 #include <BluetoothSerial.h>
-#include <NimBLEDevice.h>
-#include <NimBLEHIDDevice.h>
 #include <Preferences.h>
+#include <WiFi.h>
 #ifdef SIDEBAND_HAS_TFT
 #include <TFT_eSPI.h>
 #endif
@@ -13,256 +12,581 @@
 #include "sideband_config.example.h"
 #endif
 
+#ifndef SIDEBAND_RADIO_ALT_NAME_HINT
+#define SIDEBAND_RADIO_ALT_NAME_HINT "TH-D74"
+#endif
+
+#ifndef SIDEBAND_RADIO_PAIRING_PIN
+#define SIDEBAND_RADIO_PAIRING_PIN ""
+#endif
+
+#ifndef SIDEBAND_RADIO_MAC
+#define SIDEBAND_RADIO_MAC ""
+#endif
+
+#ifndef SIDEBAND_WIFI_AP_PASSWORD
+#define SIDEBAND_WIFI_AP_PASSWORD "sideband-bridge"
+#endif
+
+#ifndef SIDEBAND_WIFI_TCP_PORT
+#define SIDEBAND_WIFI_TCP_PORT 8001
+#endif
+
+#ifndef SIDEBAND_TFT_ANIMATIONS
+#define SIDEBAND_TFT_ANIMATIONS 0
+#endif
+
 namespace {
 
 BluetoothSerial radioSerial;
-NimBLEServer *bleServer = nullptr;
-NimBLECharacteristic *bleTx = nullptr;
 Preferences preferences;
+WiFiServer wifiServer(SIDEBAND_WIFI_TCP_PORT);
+WiFiClient wifiClient;
 #ifdef SIDEBAND_HAS_TFT
 TFT_eSPI tft;
 #endif
 
-constexpr char BLE_SERVICE_UUID[] = "6e400001-b5a3-f393-e0a9-e50e24dcca9e";
-constexpr char BLE_RX_UUID[] = "6e400002-b5a3-f393-e0a9-e50e24dcca9e";
-constexpr char BLE_TX_UUID[] = "6e400003-b5a3-f393-e0a9-e50e24dcca9e";
-constexpr char BLE_DEVICE_INFO_SERVICE_UUID[] = "180a";
-constexpr char BLE_MANUFACTURER_UUID[] = "2a29";
-constexpr char BLE_MODEL_UUID[] = "2a24";
-constexpr char BLE_FIRMWARE_UUID[] = "2a26";
-constexpr char BLE_HID_SERVICE_UUID[] = "1812";
-constexpr char BLE_SHORT_ADVERTISED_NAME[] = "SDBAND";
-constexpr uint16_t BLE_APPEARANCE_GENERIC_COMPUTER = 128;
 constexpr uint8_t BUTTON_NEXT_PIN = 0;
 constexpr uint8_t BUTTON_SELECT_PIN = 35;
+constexpr uint8_t KISS_FEND = 0xC0;
 constexpr uint32_t BUTTON_DEBOUNCE_MS = 45;
 constexpr uint32_t DISPLAY_REFRESH_MS = 250;
+constexpr uint32_t RADIO_CONNECT_INTERVAL_MS = 15000;
+constexpr uint32_t RADIO_SCAN_TIMEOUT_MS = 6000;
 constexpr char SETTINGS_NAMESPACE[] = "sideband";
 constexpr char ACTIVE_MODE_KEY[] = "mode";
+constexpr char RADIO_MAC_KEY[] = "radio_mac";
+constexpr char RADIO_NAME_KEY[] = "radio_name";
+constexpr char RADIO_ALT_NAME_KEY[] = "radio_alt";
 
-uint32_t radioToBleCount = 0;
-uint32_t bleToRadioCount = 0;
-bool bleConnected = false;
+uint32_t radioToClientCount = 0;
+uint32_t clientToRadioCount = 0;
 bool displayDirty = true;
+bool radioSerialStarted = false;
+bool wifiStarted = false;
+String wifiApSsid = "";
 
 enum class ClientMode : uint8_t {
-  Ble,
-  Usb,
-  Wifi,
-  IosDiscovery,
+  Usb = 0,
+  Wifi = 1,
 };
 
-ClientMode selectedMode = ClientMode::Ble;
-ClientMode activeMode = ClientMode::Ble;
+enum class RadioState : uint8_t {
+  Disabled,
+  Idle,
+  Scanning,
+  Pairing,
+  Connecting,
+  Reconnecting,
+  Connected,
+  Error,
+};
+
+enum class TowerIconMode : uint8_t {
+  Question,
+  Lightning,
+  Arcs,
+};
+
+ClientMode selectedMode = ClientMode::Usb;
+ClientMode activeMode = ClientMode::Usb;
+RadioState radioState = RadioState::Disabled;
+String radioPeerName = "";
+String radioPeerAddress = "";
+String radioTargetName = "";
+String radioTargetAltName = "";
+String radioTargetMac = "";
+char radioPairingCode[8] = "";
+uint32_t radioConnectAttempts = 0;
+uint32_t radioReconnects = 0;
+uint32_t radioPairingEvents = 0;
 
 void renderDisplay();
 
+bool serialDiagnosticsEnabled() {
+  return activeMode != ClientMode::Usb;
+}
+
+void logLine(const char *line) {
+  if (serialDiagnosticsEnabled()) {
+    Serial.println(line);
+  }
+}
+
 const char *modeName(ClientMode mode) {
   switch (mode) {
-    case ClientMode::Ble:
-      return "BLE";
     case ClientMode::Usb:
       return "USB-C";
     case ClientMode::Wifi:
       return "Wi-Fi";
-    case ClientMode::IosDiscovery:
-      return "iOS DISC";
   }
   return "?";
 }
 
-bool modeUsesBle(ClientMode mode) {
-  return mode == ClientMode::Ble || mode == ClientMode::IosDiscovery;
-}
-
-const char *bleStatusName() {
-  if (!modeUsesBle(activeMode)) {
-    return "off";
+const char *radioStateName(RadioState state) {
+  switch (state) {
+    case RadioState::Disabled:
+      return "OFF";
+    case RadioState::Idle:
+      return "IDLE";
+    case RadioState::Scanning:
+      return "SCAN";
+    case RadioState::Pairing:
+      return "PAIR";
+    case RadioState::Connecting:
+      return "CONNECT";
+    case RadioState::Reconnecting:
+      return "RECONNECT";
+    case RadioState::Connected:
+      return "LINKED";
+    case RadioState::Error:
+      return "ERROR";
   }
-  return bleConnected ? "connected" : "advertising";
+  return "?";
 }
 
 ClientMode nextMode(ClientMode mode) {
-  switch (mode) {
-    case ClientMode::Ble:
-      return ClientMode::Usb;
-    case ClientMode::Usb:
-      return ClientMode::Wifi;
-    case ClientMode::Wifi:
-      return ClientMode::IosDiscovery;
-    case ClientMode::IosDiscovery:
-      return ClientMode::Ble;
-  }
-  return ClientMode::Ble;
+  return mode == ClientMode::Usb ? ClientMode::Wifi : ClientMode::Usb;
 }
 
 ClientMode modeFromValue(uint8_t value) {
   switch (value) {
-    case static_cast<uint8_t>(ClientMode::Ble):
-      return ClientMode::Ble;
-    case static_cast<uint8_t>(ClientMode::Usb):
-      return ClientMode::Usb;
     case static_cast<uint8_t>(ClientMode::Wifi):
       return ClientMode::Wifi;
-    case static_cast<uint8_t>(ClientMode::IosDiscovery):
-      return ClientMode::IosDiscovery;
+    case static_cast<uint8_t>(ClientMode::Usb):
     default:
-      return ClientMode::Ble;
+      return ClientMode::Usb;
   }
 }
 
-void loadActiveMode() {
+void setRadioState(RadioState state) {
+  if (radioState == state) {
+    return;
+  }
+  radioState = state;
+  displayDirty = true;
+}
+
+bool configuredRadioMacPresent() {
+  return radioTargetMac.length() >= 11;
+}
+
+void setRadioPairingCode(uint32_t code) {
+  snprintf(radioPairingCode, sizeof(radioPairingCode), "%06lu", static_cast<unsigned long>(code));
+  radioPairingEvents++;
+  setRadioState(RadioState::Pairing);
+  displayDirty = true;
+}
+
+void clearRadioPairingCode() {
+  if (radioPairingCode[0] == '\0') {
+    return;
+  }
+  radioPairingCode[0] = '\0';
+  displayDirty = true;
+}
+
+bool radioNameMatches(const std::string &name) {
+  if (name.empty()) {
+    return false;
+  }
+
+  String candidate(name.c_str());
+  candidate.toUpperCase();
+  String primary(radioTargetName);
+  String alternate(radioTargetAltName);
+  primary.toUpperCase();
+  alternate.toUpperCase();
+  return candidate.indexOf(primary) >= 0 || candidate.indexOf(alternate) >= 0;
+}
+
+void loadSettings() {
   preferences.begin(SETTINGS_NAMESPACE, false);
-  activeMode = modeFromValue(preferences.getUChar(ACTIVE_MODE_KEY, static_cast<uint8_t>(ClientMode::Ble)));
+  activeMode = modeFromValue(preferences.getUChar(ACTIVE_MODE_KEY, static_cast<uint8_t>(ClientMode::Usb)));
   selectedMode = activeMode;
+  radioTargetName = preferences.getString(RADIO_NAME_KEY, SIDEBAND_RADIO_NAME_HINT);
+  radioTargetAltName = preferences.getString(RADIO_ALT_NAME_KEY, SIDEBAND_RADIO_ALT_NAME_HINT);
+  radioTargetMac = preferences.getString(RADIO_MAC_KEY, SIDEBAND_RADIO_MAC);
 }
 
 void saveActiveMode(ClientMode mode) {
   preferences.putUChar(ACTIVE_MODE_KEY, static_cast<uint8_t>(mode));
 }
 
-class ServerCallbacks : public NimBLEServerCallbacks {
-  void onConnect(NimBLEServer *server, NimBLEConnInfo &connInfo) override {
-    (void)server;
-    (void)connInfo;
-    bleConnected = true;
-    displayDirty = true;
+void setupRadioTransport() {
+  if (radioSerialStarted) {
+    return;
   }
 
-  void onDisconnect(NimBLEServer *server, NimBLEConnInfo &connInfo, int reason) override {
-    (void)connInfo;
-    (void)reason;
-    bleConnected = false;
-    displayDirty = true;
-    server->startAdvertising();
+  radioSerial.enableSSP();
+  radioSerial.onConfirmRequest([](uint32_t code) {
+    setRadioPairingCode(code);
+    if (serialDiagnosticsEnabled()) {
+      Serial.printf("SIDEBAND radio pairing confirm code=%06lu\n", static_cast<unsigned long>(code));
+    }
+    radioSerial.confirmReply(true);
+  });
+  radioSerial.onAuthComplete([](boolean success) {
+    clearRadioPairingCode();
+    setRadioState(success ? RadioState::Connecting : RadioState::Error);
+    if (serialDiagnosticsEnabled()) {
+      Serial.printf("SIDEBAND radio pairing auth=%s\n", success ? "ok" : "failed");
+    }
+  });
+  if (strlen(SIDEBAND_RADIO_PAIRING_PIN) > 0) {
+    radioSerial.setPin(SIDEBAND_RADIO_PAIRING_PIN);
   }
-};
 
-class RxCallbacks : public NimBLECharacteristicCallbacks {
-  void onWrite(NimBLECharacteristic *characteristic, NimBLEConnInfo &connInfo) override {
-    (void)connInfo;
-    std::string value = characteristic->getValue();
-    if (value.empty()) {
+  radioSerialStarted = radioSerial.begin(SIDEBAND_DEVICE_NAME, true);
+  setRadioState(radioSerialStarted ? RadioState::Idle : RadioState::Error);
+}
+
+bool connectRadioFromScan() {
+  setRadioState(RadioState::Scanning);
+  logLine("SIDEBAND radio scan start");
+  BTScanResults *results = radioSerial.discover(RADIO_SCAN_TIMEOUT_MS);
+  if (results == nullptr) {
+    logLine("SIDEBAND radio scan failed");
+    return false;
+  }
+
+  int count = results->getCount();
+  if (serialDiagnosticsEnabled()) {
+    Serial.printf("SIDEBAND radio scan results=%d\n", count);
+  }
+  for (int i = 0; i < count; i++) {
+    BTAdvertisedDevice *device = results->getDevice(i);
+    if (device == nullptr) {
+      continue;
+    }
+
+    std::string deviceName = device->haveName() ? device->getName() : "";
+    if (!radioNameMatches(deviceName)) {
+      continue;
+    }
+
+    radioPeerName = deviceName.c_str();
+    radioPeerAddress = device->getAddress().toString(true);
+    setRadioState(RadioState::Connecting);
+    radioConnectAttempts++;
+    if (radioSerial.connect(device->getAddress())) {
+      clearRadioPairingCode();
+      setRadioState(RadioState::Connected);
+      return true;
+    }
+  }
+
+  logLine("SIDEBAND radio not found");
+  return false;
+}
+
+void maintainRadioConnection() {
+  static uint32_t lastConnectMs = 0;
+  setupRadioTransport();
+  if (!radioSerialStarted) {
+    return;
+  }
+
+  if (radioState == RadioState::Connected) {
+    if (radioSerial.connected()) {
       return;
     }
 
-#ifndef SIDEBAND_BLE_ONLY
-    radioSerial.write(reinterpret_cast<const uint8_t *>(value.data()), value.size());
-#endif
-    bleToRadioCount++;
+    radioReconnects++;
+    radioSerial.disconnect();
+    clearRadioPairingCode();
+    setRadioState(RadioState::Reconnecting);
+  }
+
+  uint32_t now = millis();
+  if (lastConnectMs != 0 && now - lastConnectMs < RADIO_CONNECT_INTERVAL_MS) {
+    return;
+  }
+  lastConnectMs = now;
+
+  radioConnectAttempts++;
+  setRadioState(RadioState::Connecting);
+  clearRadioPairingCode();
+
+  if (configuredRadioMacPresent()) {
+    radioPeerName = radioTargetName;
+    radioPeerAddress = radioTargetMac;
+    if (radioSerial.connect(BTAddress(radioTargetMac))) {
+      setRadioState(RadioState::Connected);
+      return;
+    }
+    setRadioState(RadioState::Reconnecting);
+    return;
+  }
+
+  if (!connectRadioFromScan()) {
+    setRadioState(RadioState::Idle);
+  }
+}
+
+void setupWifiTransport() {
+  if (wifiStarted || activeMode != ClientMode::Wifi) {
+    return;
+  }
+
+  uint64_t chipId = ESP.getEfuseMac();
+  char ssid[24];
+  snprintf(ssid, sizeof(ssid), "Sideband-%04X", static_cast<uint16_t>(chipId & 0xffff));
+  wifiApSsid = ssid;
+
+  WiFi.mode(WIFI_AP);
+  WiFi.softAP(wifiApSsid.c_str(), SIDEBAND_WIFI_AP_PASSWORD);
+  wifiServer.begin();
+  wifiServer.setNoDelay(true);
+  wifiStarted = true;
+  displayDirty = true;
+}
+
+void maintainWifiClient() {
+  if (activeMode != ClientMode::Wifi || !wifiStarted) {
+    return;
+  }
+
+  if (wifiClient && wifiClient.connected()) {
+    return;
+  }
+
+  WiFiClient candidate = wifiServer.available();
+  if (candidate) {
+    if (wifiClient) {
+      wifiClient.stop();
+    }
+    wifiClient = candidate;
+    wifiClient.setNoDelay(true);
     displayDirty = true;
   }
-};
-
-void setupHidDiscoveryProfile() {
-  static uint8_t keyboardReportMap[] = {
-      0x05, 0x01,  // Usage Page (Generic Desktop)
-      0x09, 0x06,  // Usage (Keyboard)
-      0xa1, 0x01,  // Collection (Application)
-      0x85, 0x01,  // Report ID (1)
-      0x05, 0x07,  // Usage Page (Keyboard)
-      0x19, 0xe0,  // Usage Minimum (Keyboard Left Control)
-      0x29, 0xe7,  // Usage Maximum (Keyboard Right GUI)
-      0x15, 0x00,  // Logical Minimum (0)
-      0x25, 0x01,  // Logical Maximum (1)
-      0x75, 0x01,  // Report Size (1)
-      0x95, 0x08,  // Report Count (8)
-      0x81, 0x02,  // Input (Data, Variable, Absolute)
-      0x95, 0x01,  // Report Count (1)
-      0x75, 0x08,  // Report Size (8)
-      0x81, 0x01,  // Input (Constant)
-      0x95, 0x06,  // Report Count (6)
-      0x75, 0x08,  // Report Size (8)
-      0x15, 0x00,  // Logical Minimum (0)
-      0x25, 0x65,  // Logical Maximum (101)
-      0x05, 0x07,  // Usage Page (Keyboard)
-      0x19, 0x00,  // Usage Minimum (Reserved)
-      0x29, 0x65,  // Usage Maximum (Keyboard Application)
-      0x81, 0x00,  // Input (Data, Array)
-      0xc0         // End Collection
-  };
-
-  NimBLEHIDDevice hid(bleServer);
-  hid.setManufacturer(SIDEBAND_BLE_MANUFACTURER);
-  hid.setPnp(0x02, 0x1209, 0x5dbd, 0x0100);
-  hid.setHidInfo(0x00, 0x01);
-  hid.setBatteryLevel(100);
-  hid.setReportMap(keyboardReportMap, sizeof(keyboardReportMap));
-  hid.getInputReport(1);
 }
 
-void setupBle() {
-  NimBLEDevice::deinit(true);
-  NimBLEDevice::init(SIDEBAND_BLE_NAME);
-  NimBLEDevice::setPower(ESP_PWR_LVL_P9);
-  NimBLEDevice::setSecurityAuth(true, false, true);
-  NimBLEDevice::setSecurityIOCap(BLE_HS_IO_NO_INPUT_OUTPUT);
-  bleServer = NimBLEDevice::createServer();
-  bleServer->setCallbacks(new ServerCallbacks());
-
-  NimBLEService *service = bleServer->createService(BLE_SERVICE_UUID);
-  NimBLECharacteristic *bleRx = service->createCharacteristic(
-      BLE_RX_UUID,
-      NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR);
-  bleTx = service->createCharacteristic(
-      BLE_TX_UUID,
-      NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY);
-
-  bleRx->setCallbacks(new RxCallbacks());
-
-  if (activeMode == ClientMode::IosDiscovery) {
-    setupHidDiscoveryProfile();
-  } else {
-    NimBLEService *deviceInfoService = bleServer->createService(BLE_DEVICE_INFO_SERVICE_UUID);
-    NimBLECharacteristic *manufacturer = deviceInfoService->createCharacteristic(
-        BLE_MANUFACTURER_UUID,
-        NIMBLE_PROPERTY::READ);
-    NimBLECharacteristic *model = deviceInfoService->createCharacteristic(
-        BLE_MODEL_UUID,
-        NIMBLE_PROPERTY::READ);
-    NimBLECharacteristic *firmware = deviceInfoService->createCharacteristic(
-        BLE_FIRMWARE_UUID,
-        NIMBLE_PROPERTY::READ);
-    manufacturer->setValue(SIDEBAND_BLE_MANUFACTURER);
-    model->setValue(SIDEBAND_BLE_MODEL);
-    firmware->setValue(SIDEBAND_VERSION);
+void relayRadioToClient() {
+  if (radioState != RadioState::Connected || !radioSerial.connected()) {
+    while (radioSerial.available()) {
+      radioSerial.read();
+    }
+    return;
   }
 
-  NimBLEAdvertising *advertising = NimBLEDevice::getAdvertising();
-  NimBLEAdvertisementData advertisementData;
-  NimBLEAdvertisementData scanResponseData;
-
-  advertisementData.setFlags(BLE_HS_ADV_F_DISC_GEN);
-  advertisementData.setName(BLE_SHORT_ADVERTISED_NAME);
-  if (activeMode == ClientMode::IosDiscovery) {
-    advertisementData.setAppearance(HID_KEYBOARD);
-    advertisementData.setCompleteServices16({NimBLEUUID(BLE_HID_SERVICE_UUID)});
-  } else {
-    advertisementData.setAppearance(BLE_APPEARANCE_GENERIC_COMPUTER);
-    advertisementData.setCompleteServices(NimBLEUUID(BLE_SERVICE_UUID));
+  uint8_t buffer[128];
+  size_t len = 0;
+  while (radioSerial.available() && len < sizeof(buffer)) {
+    buffer[len++] = static_cast<uint8_t>(radioSerial.read());
   }
-  scanResponseData.setName(SIDEBAND_BLE_NAME);
+  if (len == 0) {
+    return;
+  }
 
-  advertising->setAdvertisementData(advertisementData);
-  advertising->setScanResponseData(scanResponseData);
-  advertising->enableScanResponse(true);
-  advertising->start();
+  if (activeMode == ClientMode::Wifi) {
+    if (wifiClient && wifiClient.connected()) {
+      wifiClient.write(buffer, len);
+      radioToClientCount++;
+      displayDirty = true;
+    }
+    return;
+  }
+
+  Serial.write(buffer, len);
+  radioToClientCount++;
+  displayDirty = true;
 }
 
-void setupButtons() {
-  pinMode(BUTTON_NEXT_PIN, INPUT_PULLUP);
-  pinMode(BUTTON_SELECT_PIN, INPUT_PULLUP);
+void relayWifiToRadio() {
+  if (activeMode != ClientMode::Wifi || !(wifiClient && wifiClient.connected())) {
+    return;
+  }
+
+  uint8_t buffer[128];
+  size_t len = 0;
+  while (wifiClient.available() && len < sizeof(buffer)) {
+    buffer[len++] = static_cast<uint8_t>(wifiClient.read());
+  }
+
+  if (len > 0 && radioState == RadioState::Connected && radioSerial.connected()) {
+    radioSerial.write(buffer, len);
+    clientToRadioCount++;
+    displayDirty = true;
+  }
 }
 
-bool buttonPressed(uint8_t pin, bool &lastStable, uint32_t &lastChangeMs) {
-  bool pressed = digitalRead(pin) == LOW;
-  uint32_t now = millis();
-  if (pressed != lastStable && now - lastChangeMs > BUTTON_DEBOUNCE_MS) {
-    lastStable = pressed;
-    lastChangeMs = now;
-    return pressed;
+bool isCommandPrefix(const String &input) {
+  return input == "help" || input == "?" || input == "status" ||
+         input.startsWith("radio ") || input.startsWith("mode ");
+}
+
+void printSerialHelp() {
+  if (!serialDiagnosticsEnabled()) {
+    return;
   }
-  return false;
+  Serial.println("SIDEBAND commands:");
+  Serial.println("  status");
+  Serial.println("  mode usb");
+  Serial.println("  mode wifi");
+  Serial.println("  radio show");
+  Serial.println("  radio mac <AA:BB:CC:DD:EE:FF>");
+  Serial.println("  radio name <name>");
+  Serial.println("  radio alt <name>");
+  Serial.println("  radio clear");
+}
+
+void printRadioConfig() {
+  if (!serialDiagnosticsEnabled()) {
+    return;
+  }
+  Serial.printf("SIDEBAND radio config name=\"%s\" alt=\"%s\" mac=%s source=preferences\n",
+                radioTargetName.c_str(),
+                radioTargetAltName.c_str(),
+                radioTargetMac.length() > 0 ? "configured" : "unset");
+}
+
+void saveRadioTargetMac(const String &mac) {
+  radioTargetMac = mac;
+  preferences.putString(RADIO_MAC_KEY, radioTargetMac);
+  radioPeerAddress = "";
+  displayDirty = true;
+}
+
+void saveRadioTargetName(const String &name) {
+  radioTargetName = name.length() > 0 ? name : String(SIDEBAND_RADIO_NAME_HINT);
+  preferences.putString(RADIO_NAME_KEY, radioTargetName);
+  displayDirty = true;
+}
+
+void saveRadioTargetAltName(const String &name) {
+  radioTargetAltName = name.length() > 0 ? name : String(SIDEBAND_RADIO_ALT_NAME_HINT);
+  preferences.putString(RADIO_ALT_NAME_KEY, radioTargetAltName);
+  displayDirty = true;
+}
+
+void clearRadioConfig() {
+  radioTargetMac = "";
+  radioTargetName = SIDEBAND_RADIO_NAME_HINT;
+  radioTargetAltName = SIDEBAND_RADIO_ALT_NAME_HINT;
+  preferences.putString(RADIO_MAC_KEY, radioTargetMac);
+  preferences.putString(RADIO_NAME_KEY, radioTargetName);
+  preferences.putString(RADIO_ALT_NAME_KEY, radioTargetAltName);
+  radioPeerName = "";
+  radioPeerAddress = "";
+  clearRadioPairingCode();
+  setRadioState(RadioState::Idle);
+  displayDirty = true;
+}
+
+void saveModeAndRestart(ClientMode mode) {
+  activeMode = mode;
+  selectedMode = mode;
+  saveActiveMode(mode);
+  displayDirty = true;
+  if (serialDiagnosticsEnabled()) {
+    Serial.printf("SIDEBAND saved mode=%s restarting\n", modeName(activeMode));
+  }
+  delay(250);
+  ESP.restart();
+}
+
+void handleSerialCommand(const String &command) {
+  if (command.length() == 0 || !isCommandPrefix(command)) {
+    return;
+  }
+
+  if (command == "help" || command == "?") {
+    printSerialHelp();
+    return;
+  }
+
+  if (command == "status") {
+    printRadioConfig();
+    return;
+  }
+
+  if (command == "mode usb") {
+    saveModeAndRestart(ClientMode::Usb);
+    return;
+  }
+
+  if (command == "mode wifi") {
+    saveModeAndRestart(ClientMode::Wifi);
+    return;
+  }
+
+  if (command == "radio show") {
+    printRadioConfig();
+    return;
+  }
+
+  if (command == "radio clear") {
+    clearRadioConfig();
+    logLine("SIDEBAND radio config cleared");
+    printRadioConfig();
+    return;
+  }
+
+  if (command.startsWith("radio mac ")) {
+    String mac = command.substring(strlen("radio mac "));
+    mac.trim();
+    saveRadioTargetMac(mac);
+    logLine("SIDEBAND radio mac saved");
+    printRadioConfig();
+    return;
+  }
+
+  if (command.startsWith("radio name ")) {
+    String name = command.substring(strlen("radio name "));
+    name.trim();
+    saveRadioTargetName(name);
+    logLine("SIDEBAND radio name saved");
+    printRadioConfig();
+    return;
+  }
+
+  if (command.startsWith("radio alt ")) {
+    String name = command.substring(strlen("radio alt "));
+    name.trim();
+    saveRadioTargetAltName(name);
+    logLine("SIDEBAND radio alternate name saved");
+    printRadioConfig();
+  }
+}
+
+void relayUsbToRadio() {
+  static bool kissFrameActive = false;
+  static String commandInput = "";
+
+  while (Serial.available() > 0) {
+    uint8_t ch = static_cast<uint8_t>(Serial.read());
+
+    if (ch == KISS_FEND) {
+      kissFrameActive = !kissFrameActive;
+      if (radioState == RadioState::Connected && radioSerial.connected()) {
+        radioSerial.write(ch);
+        clientToRadioCount++;
+        displayDirty = true;
+      }
+      continue;
+    }
+
+    if (kissFrameActive) {
+      if (radioState == RadioState::Connected && radioSerial.connected()) {
+        radioSerial.write(ch);
+      }
+      continue;
+    }
+
+    if (ch == '\r') {
+      continue;
+    }
+    if (ch == '\n') {
+      commandInput.trim();
+      handleSerialCommand(commandInput);
+      commandInput = "";
+      continue;
+    }
+    if (commandInput.length() < 96 && ch >= 0x20 && ch <= 0x7e) {
+      commandInput += static_cast<char>(ch);
+    }
+  }
 }
 
 void handleButtons() {
@@ -271,18 +595,24 @@ void handleButtons() {
   static uint32_t nextChangedMs = 0;
   static uint32_t selectChangedMs = 0;
 
+  auto buttonPressed = [](uint8_t pin, bool &lastStable, uint32_t &lastChangeMs) {
+    bool pressed = digitalRead(pin) == LOW;
+    uint32_t now = millis();
+    if (pressed != lastStable && now - lastChangeMs > BUTTON_DEBOUNCE_MS) {
+      lastStable = pressed;
+      lastChangeMs = now;
+      return pressed;
+    }
+    return false;
+  };
+
   if (buttonPressed(BUTTON_NEXT_PIN, nextStable, nextChangedMs)) {
     selectedMode = nextMode(selectedMode);
     displayDirty = true;
   }
 
   if (buttonPressed(BUTTON_SELECT_PIN, selectStable, selectChangedMs)) {
-    activeMode = selectedMode;
-    saveActiveMode(activeMode);
-    displayDirty = true;
-    Serial.printf("SIDEBAND saved mode=%s restarting\n", modeName(activeMode));
-    delay(250);
-    ESP.restart();
+    saveModeAndRestart(selectedMode);
   }
 }
 
@@ -307,31 +637,129 @@ void copyPreviousValue(char *target, size_t targetSize, const char *value) {
   target[targetSize - 1] = '\0';
 }
 
+uint16_t radioStateColor(RadioState state) {
+  switch (state) {
+    case RadioState::Connected:
+      return TFT_GREEN;
+    case RadioState::Pairing:
+      return TFT_ORANGE;
+    case RadioState::Connecting:
+    case RadioState::Reconnecting:
+      return TFT_YELLOW;
+    case RadioState::Error:
+      return TFT_RED;
+    case RadioState::Disabled:
+      return TFT_DARKGREY;
+    case RadioState::Scanning:
+    case RadioState::Idle:
+      return TFT_CYAN;
+  }
+  return TFT_WHITE;
+}
+
+TowerIconMode towerIconMode() {
+  if (radioState == RadioState::Connected &&
+      (activeMode == ClientMode::Usb || (wifiClient && wifiClient.connected()))) {
+    return TowerIconMode::Arcs;
+  }
+  if (radioState == RadioState::Connecting || radioState == RadioState::Reconnecting ||
+      radioState == RadioState::Pairing || radioState == RadioState::Connected) {
+    return TowerIconMode::Lightning;
+  }
+  return TowerIconMode::Question;
+}
+
+void drawRadioTowerIcon(RadioState state) {
+  constexpr int16_t originX = 186;
+  constexpr int16_t originY = 36;
+  constexpr int16_t width = 48;
+  constexpr int16_t height = 74;
+  constexpr int16_t towerX = originX + 24;
+  constexpr int16_t towerTop = originY + 20;
+  constexpr int16_t towerBottom = originY + 58;
+  uint16_t color = radioStateColor(state);
+  bool animationsEnabled = SIDEBAND_TFT_ANIMATIONS;
+  TowerIconMode mode = towerIconMode();
+  static bool iconDrawn = false;
+  static RadioState previousState = RadioState::Error;
+  static TowerIconMode previousMode = TowerIconMode::Question;
+  if (!animationsEnabled && iconDrawn && state == previousState && mode == previousMode) {
+    return;
+  }
+
+  uint8_t frame = animationsEnabled ? ((millis() / DISPLAY_REFRESH_MS) % 4) : 0;
+  int16_t pulse = static_cast<int16_t>(frame) * 3;
+
+  tft.fillRect(originX, originY, width, height, TFT_BLACK);
+  tft.drawLine(towerX, towerTop, towerX, towerBottom, color);
+  tft.drawLine(towerX, towerTop + 6, towerX - 12, towerBottom, color);
+  tft.drawLine(towerX, towerTop + 6, towerX + 12, towerBottom, color);
+  tft.drawLine(towerX - 9, towerBottom - 10, towerX + 9, towerBottom - 10, color);
+  tft.drawLine(towerX - 6, towerBottom, towerX + 6, towerBottom, color);
+  tft.fillCircle(towerX, towerTop, 3, color);
+
+  if (mode == TowerIconMode::Arcs) {
+    tft.drawArc(towerX, towerTop, 10 + pulse, 8 + pulse, 300, 60, color, TFT_BLACK, false);
+    tft.drawArc(towerX, towerTop, 18 + pulse, 16 + pulse, 300, 60, color, TFT_BLACK, false);
+    tft.drawArc(towerX, towerTop, 10 + pulse, 8 + pulse, 120, 240, color, TFT_BLACK, false);
+    tft.drawArc(towerX, towerTop, 18 + pulse, 16 + pulse, 120, 240, color, TFT_BLACK, false);
+  } else if (mode == TowerIconMode::Lightning) {
+    tft.drawLine(towerX - 18, towerTop - 14, towerX - 5, towerTop - 2, color);
+    tft.drawLine(towerX - 5, towerTop - 2, towerX - 12, towerTop + 2, color);
+    tft.drawLine(towerX - 12, towerTop + 2, towerX, towerTop, color);
+    tft.drawLine(towerX + 18, towerTop - 14, towerX + 5, towerTop - 2, color);
+    tft.drawLine(towerX + 5, towerTop - 2, towerX + 12, towerTop + 2, color);
+    tft.drawLine(towerX + 12, towerTop + 2, towerX, towerTop, color);
+  } else {
+    tft.drawCircle(towerX - 16, towerTop - 14, 3, color);
+    tft.drawLine(towerX - 14, towerTop - 12, towerX - 10, towerTop - 8, color);
+    tft.fillCircle(towerX - 8, towerTop - 6, 1, color);
+    tft.drawCircle(towerX + 16, towerTop - 14, 3, color);
+    tft.drawLine(towerX + 14, towerTop - 12, towerX + 10, towerTop - 8, color);
+    tft.fillCircle(towerX + 8, towerTop - 6, 1, color);
+  }
+
+  if (state == RadioState::Pairing) {
+    tft.drawString("PIN", originX + 12, originY + 2, 1);
+  } else if (state == RadioState::Connected) {
+    tft.fillCircle(towerX, towerTop, 5, color);
+  } else {
+    tft.fillCircle(towerX, towerTop, 2, color);
+  }
+
+  iconDrawn = true;
+  previousState = state;
+  previousMode = mode;
+}
+
 void drawDisplayFrame() {
   tft.fillScreen(TFT_BLACK);
   tft.setTextDatum(TL_DATUM);
   tft.setTextColor(TFT_CYAN, TFT_BLACK);
-  tft.drawString("SIDEBAND", 6, 4, 4);
+  tft.drawString("SIDEBAND", 6, 8, 2);
 
-  drawStaticLabel(6, 34, "ADV");
+  drawStaticLabel(6, 34, "CLIENT");
   drawStaticLabel(6, 58, "ACTIVE");
   drawStaticLabel(86, 58, "SELECT");
-  drawStaticLabel(6, 98, "BLE");
-  drawStaticLabel(6, 138, "COUNTERS");
-
-  tft.setTextColor(TFT_DARKGREY, TFT_BLACK);
-  tft.drawString("BTN1 next", 6, 202, 2);
-  tft.drawString("BTN2 select", 6, 220, 2);
+  drawStaticLabel(6, 98, "LINK");
+  drawStaticLabel(6, 138, "RADIO");
+  drawStaticLabel(6, 168, "PAIR");
+  drawStaticLabel(86, 168, "COUNTERS");
+  drawStaticLabel(6, 198, "DEVICES");
 }
 
 void renderDisplay() {
   static uint32_t lastDrawMs = 0;
   static bool frameDrawn = false;
-  static char previousAdvertisedName[16] = "";
+  static char previousClient[32] = "";
   static char previousActiveMode[16] = "";
   static char previousSelectedMode[16] = "";
-  static char previousBleStatus[16] = "";
+  static char previousClientStatus[32] = "";
+  static char previousRadioStatus[32] = "";
+  static char previousPairingStatus[16] = "";
   static char previousCounters[32] = "";
+  static char previousClientDevice[32] = "";
+  static char previousRadioDevice[32] = "";
   uint32_t now = millis();
   if (!displayDirty && now - lastDrawMs < DISPLAY_REFRESH_MS) {
     return;
@@ -344,8 +772,14 @@ void renderDisplay() {
     frameDrawn = true;
   }
 
-  drawValueField(50, 34, 80, BLE_SHORT_ADVERTISED_NAME, previousAdvertisedName, TFT_GREEN);
-  copyPreviousValue(previousAdvertisedName, sizeof(previousAdvertisedName), BLE_SHORT_ADVERTISED_NAME);
+  char clientLabel[32];
+  if (activeMode == ClientMode::Wifi) {
+    snprintf(clientLabel, sizeof(clientLabel), "%.20s", wifiApSsid.length() > 0 ? wifiApSsid.c_str() : "Wi-Fi AP");
+  } else {
+    snprintf(clientLabel, sizeof(clientLabel), "USB SERIAL");
+  }
+  drawValueField(62, 34, 108, clientLabel, previousClient, TFT_GREEN);
+  copyPreviousValue(previousClient, sizeof(previousClient), clientLabel);
 
   drawValueField(6, 74, 72, modeName(activeMode), previousActiveMode, TFT_YELLOW);
   copyPreviousValue(previousActiveMode, sizeof(previousActiveMode), modeName(activeMode));
@@ -353,21 +787,53 @@ void renderDisplay() {
   drawValueField(86, 74, 110, modeName(selectedMode), previousSelectedMode, TFT_ORANGE);
   copyPreviousValue(previousSelectedMode, sizeof(previousSelectedMode), modeName(selectedMode));
 
-  const char *bleStatus = modeUsesBle(activeMode) ? (bleConnected ? "CONNECTED" : "ADVERTISING") : "OFF";
-  uint16_t bleColor = modeUsesBle(activeMode) ? (bleConnected ? TFT_GREEN : TFT_CYAN) : TFT_DARKGREY;
-  drawValueField(6, 114, 148, bleStatus, previousBleStatus, bleColor);
-  copyPreviousValue(previousBleStatus, sizeof(previousBleStatus), bleStatus);
+  char clientStatus[32];
+  if (activeMode == ClientMode::Wifi) {
+    snprintf(clientStatus, sizeof(clientStatus), "%s %s",
+             WiFi.softAPIP().toString().c_str(),
+             (wifiClient && wifiClient.connected()) ? "CLIENT" : "OPEN");
+  } else {
+    snprintf(clientStatus, sizeof(clientStatus), "SERIAL READY");
+  }
+  drawValueField(6, 114, 168, clientStatus, previousClientStatus, TFT_CYAN);
+  copyPreviousValue(previousClientStatus, sizeof(previousClientStatus), clientStatus);
+
+  char radioStatus[32];
+  snprintf(radioStatus, sizeof(radioStatus), "%s %s",
+           radioStateName(radioState),
+           radioPeerName.length() > 0 ? radioPeerName.c_str() : "");
+  drawValueField(6, 154, 180, radioStatus, previousRadioStatus, radioStateColor(radioState));
+  copyPreviousValue(previousRadioStatus, sizeof(previousRadioStatus), radioStatus);
+  drawRadioTowerIcon(radioState);
+
+  const char *pairingStatus = radioPairingCode[0] != '\0' ? radioPairingCode : "-";
+  drawValueField(6, 184, 72, pairingStatus, previousPairingStatus,
+                 radioPairingCode[0] != '\0' ? TFT_ORANGE : TFT_DARKGREY);
+  copyPreviousValue(previousPairingStatus, sizeof(previousPairingStatus), pairingStatus);
 
   char counts[32];
   snprintf(counts, sizeof(counts), "RX %lu TX %lu",
-           static_cast<unsigned long>(bleToRadioCount),
-           static_cast<unsigned long>(radioToBleCount));
-  drawValueField(6, 154, 148, counts, previousCounters, TFT_WHITE);
+           static_cast<unsigned long>(clientToRadioCount),
+           static_cast<unsigned long>(radioToClientCount));
+  drawValueField(86, 184, 148, counts, previousCounters, TFT_WHITE);
   copyPreviousValue(previousCounters, sizeof(previousCounters), counts);
+
+  char clientDevice[32];
+  snprintf(clientDevice, sizeof(clientDevice), "%s %s",
+           activeMode == ClientMode::Wifi ? "WIFI" : "USB",
+           activeMode == ClientMode::Wifi && wifiClient && wifiClient.connected() ? "IPHONE" : "-");
+  drawValueField(6, 214, 84, clientDevice, previousClientDevice, TFT_GREEN);
+  copyPreviousValue(previousClientDevice, sizeof(previousClientDevice), clientDevice);
+
+  char radioDevice[32];
+  snprintf(radioDevice, sizeof(radioDevice), "RAD %.12s",
+           radioPeerName.length() > 0 ? radioPeerName.c_str() : radioTargetName.c_str());
+  drawValueField(96, 214, 114, radioDevice, previousRadioDevice,
+                 radioState == RadioState::Connected ? TFT_GREEN : TFT_DARKGREY);
+  copyPreviousValue(previousRadioDevice, sizeof(previousRadioDevice), radioDevice);
 }
 
 void setupDisplay() {
-  Serial.println("SIDEBAND display init");
   pinMode(TFT_BL, OUTPUT);
   digitalWrite(TFT_BL, TFT_BACKLIGHT_ON);
   tft.init();
@@ -375,39 +841,22 @@ void setupDisplay() {
   tft.invertDisplay(true);
   tft.fillScreen(TFT_BLACK);
   displayDirty = true;
-  Serial.println("SIDEBAND display ready");
 }
 #else
 void renderDisplay() {}
 void setupDisplay() {}
 #endif
 
-void relayRadioToBle() {
-#ifdef SIDEBAND_BLE_ONLY
-  return;
-#else
-  if (!bleConnected || bleTx == nullptr) {
-    while (radioSerial.available()) {
-      radioSerial.read();
-    }
-    return;
-  }
-
-  uint8_t buffer[128];
-  size_t len = 0;
-  while (radioSerial.available() && len < sizeof(buffer)) {
-    buffer[len++] = static_cast<uint8_t>(radioSerial.read());
-  }
-
-  if (len > 0) {
-    bleTx->setValue(buffer, len);
-    bleTx->notify();
-    radioToBleCount++;
-  }
-#endif
+void setupButtons() {
+  pinMode(BUTTON_NEXT_PIN, INPUT_PULLUP);
+  pinMode(BUTTON_SELECT_PIN, INPUT_PULLUP);
 }
 
 void printStatus() {
+  if (!serialDiagnosticsEnabled()) {
+    return;
+  }
+
   static uint32_t lastStatusMs = 0;
   uint32_t now = millis();
   if (now - lastStatusMs < 5000) {
@@ -416,14 +865,18 @@ void printStatus() {
   lastStatusMs = now;
 
   Serial.printf(
-      "SIDEBAND status=running mode=%s selected=%s adv=%s name=\"%s\" ble=%s radio_to_ble=%lu ble_to_radio=%lu\n",
+      "SIDEBAND status=running mode=%s selected=%s wifi=%s radio=%s radio_peer=\"%s\" pair=\"%s\" pair_events=%lu attempts=%lu reconnects=%lu radio_to_client=%lu client_to_radio=%lu\n",
       modeName(activeMode),
       modeName(selectedMode),
-      BLE_SHORT_ADVERTISED_NAME,
-      SIDEBAND_BLE_NAME,
-      bleStatusName(),
-      static_cast<unsigned long>(radioToBleCount),
-      static_cast<unsigned long>(bleToRadioCount));
+      activeMode == ClientMode::Wifi ? WiFi.softAPIP().toString().c_str() : "off",
+      radioStateName(radioState),
+      radioPeerName.c_str(),
+      radioPairingCode[0] != '\0' ? radioPairingCode : "-",
+      static_cast<unsigned long>(radioPairingEvents),
+      static_cast<unsigned long>(radioConnectAttempts),
+      static_cast<unsigned long>(radioReconnects),
+      static_cast<unsigned long>(radioToClientCount),
+      static_cast<unsigned long>(clientToRadioCount));
 }
 
 }  // namespace
@@ -432,28 +885,21 @@ void setup() {
   Serial.begin(SIDEBAND_SERIAL_BAUD);
   delay(300);
 
-  Serial.println("SIDEBAND boot");
-  loadActiveMode();
+  loadSettings();
   setupButtons();
   setupDisplay();
-#ifdef SIDEBAND_BLE_ONLY
-  Serial.println("BLE diagnostic mode: Bluetooth Classic disabled");
-#else
-  Serial.println("Primary bridge target: Bluetooth Classic capable ESP32");
-
-  if (activeMode == ClientMode::Ble) {
-    radioSerial.begin(SIDEBAND_DEVICE_NAME, true);
-  }
-#endif
-
-  if (modeUsesBle(activeMode)) {
-    setupBle();
-  }
+  setupRadioTransport();
+  setupWifiTransport();
+  printRadioConfig();
 }
 
 void loop() {
   handleButtons();
-  relayRadioToBle();
+  maintainRadioConnection();
+  maintainWifiClient();
+  relayUsbToRadio();
+  relayWifiToRadio();
+  relayRadioToClient();
   renderDisplay();
   printStatus();
   delay(5);

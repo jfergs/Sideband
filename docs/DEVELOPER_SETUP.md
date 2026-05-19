@@ -52,8 +52,8 @@ logs.
 
 ## First Bring-Up Checks
 
-- Serial output shows `SIDEBAND boot`.
-- BLE advertises as `Sideband BLE`.
-- The board remains stable for 10 minutes while advertising.
+- TFT output shows USB-C or Wi-Fi client mode and radio state.
+- Wi-Fi mode exposes a `Sideband-XXXX` access point.
+- The board remains stable for 10 minutes while attempting radio connection.
 - Bluetooth Classic SPP examples compile for the selected board.
 - No packet payloads are logged by default.

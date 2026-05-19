@@ -8,16 +8,17 @@ radio design work here; roll up only cross-project dependencies to
 
 - Repository has moved from planning placeholder to initial implementation
   scaffold.
-- README defines the project around the TH-D75 class Bluetooth bridge and BLE
-  mobile transport.
-- Architecture notes define Bluetooth Classic SPP, BLE UART, KISS relay, privacy
-  defaults, and future expansion boundaries.
+- README defines the project around the TH-D75 class Bluetooth bridge with
+  USB-C serial and Wi-Fi TCP client transports.
+- Architecture notes define Bluetooth Classic SPP, USB serial, Wi-Fi TCP KISS,
+  privacy defaults, and future expansion boundaries.
 - Repository structure, contribution files, license, hardware/protocol notes,
   developer setup notes, and the first PlatformIO firmware scaffold are present.
 - Initial direction is a portable RF bridge and packet middleware for Kenwood
   TH-D75 class radios.
   - Core transport: ESP32 Bluetooth Classic SPP to radio.
-  - Client transport: BLE UART for iPhone/mobile interoperability.
+  - Client transport: USB-C serial or Wi-Fi TCP for iPhone/mobile
+    interoperability.
   - Packet middleware: KISS framing and transparent relay.
   - Field UI: low-refresh instrumentation display on supported ESP32 boards.
 - Individual `SB-XXX` cards are tracked directly in this backlog.
@@ -26,7 +27,7 @@ radio design work here; roll up only cross-project dependencies to
 
 - Define the first Sideband operating scenario.
   - Start with a Kenwood TH-D75 class radio paired to an ESP32 bridge.
-  - Support iPhone/mobile packet workflows over BLE UART.
+  - Support iPhone/mobile packet workflows over USB-C serial or Wi-Fi TCP.
   - Keep low-bandwidth status exchange, mesh relay notes, and radio-adjacent
     operator coordination as later scenarios.
   - Identify the devices involved and what data is safe to transmit.
@@ -41,7 +42,8 @@ radio design work here; roll up only cross-project dependencies to
 
 - `SB-002` Create the initial project README.
   - Describe the TH-D75 Bluetooth bridge purpose.
-  - Explain BLE to Bluetooth Classic translation.
+  - Explain USB-C/Wi-Fi client transport to Bluetooth Classic radio
+    translation.
   - Document supported ESP32 families and recommended boards.
   - Include architecture diagrams and project philosophy.
   - Warn clearly that ESP32-S3, ESP32-C3, and ESP32-C6 do not support Bluetooth
@@ -50,10 +52,10 @@ radio design work here; roll up only cross-project dependencies to
 - `SB-090` Write the architecture note.
   - Define roles for radio, ESP32 bridge, iPhone/mobile app, and future relay
     services.
-  - Capture Bluetooth Classic SPP, BLE UART, KISS, Wi-Fi TCP KISS, MQTT,
+  - Capture Bluetooth Classic SPP, USB serial, KISS, Wi-Fi TCP KISS, MQTT,
     Meshtastic, and file-based exchange as transport options.
-  - Document Bluetooth architecture, KISS protocol flow, BLE transport, and
-    future expansion boundaries.
+  - Document Bluetooth architecture, KISS protocol flow, USB/Wi-Fi client
+    transports, and future expansion boundaries.
   - Define privacy and redaction expectations for field logs.
 
 - Build a message/data model.
@@ -66,8 +68,8 @@ radio design work here; roll up only cross-project dependencies to
 - Decide first implementation target.
   - PlatformIO firmware prototype on Bluetooth Classic capable ESP32 hardware.
   - TFT instrumentation UI with packet counters and connection state.
-  - BLE UART service for mobile clients.
-  - KISS relay between Bluetooth Classic SPP and BLE.
+  - USB-C serial and Wi-Fi TCP services for mobile clients.
+  - KISS relay between Bluetooth Classic SPP and USB-C/Wi-Fi clients.
 
 - `SB-010` Document compatible ESP32 hardware.
   - Supported chips: ESP32-WROOM, ESP32-WROVER, and ESP32-D0WD families with
@@ -84,7 +86,7 @@ radio design work here; roll up only cross-project dependencies to
 
 - `SB-020` Set up the PlatformIO firmware foundation.
   - Configure ESP32 board definitions for supported Bluetooth Classic boards.
-  - Add TFT_eSPI and NimBLE-Arduino dependencies.
+  - Add TFT_eSPI dependency for supported display boards.
   - Validate serial flashing and serial monitor workflow.
 
 - `SB-091` Create developer setup guide.
@@ -110,6 +112,18 @@ radio design work here; roll up only cross-project dependencies to
   - Preserve low-refresh field readability while avoiding distracting screen
     flash during normal status updates.
 
+- `SB-024` Add radio tower connection-status iconography.
+  - Add a compact broadcast-tower icon to the TFT instrumentation screen.
+  - Mirror radio-link state with changing signal icons around the tower.
+  - Represent discoverable, connecting, pairing, connected, and error states
+    with distinct visual treatments.
+  - Keep the icon readable on TTGO T-Display class screens without crowding
+    packet counters or pairing-code text.
+  - Use the same state source as the Bluetooth connection state machine so the
+    visual indicator does not drift from serial/status output.
+  - Refine custom question-mark glyphs so they read clearly as question marks
+    when rotated toward the tower instead of resembling magnifying glasses.
+
 - `SB-030` Implement Bluetooth Classic radio transport.
   - Discover, pair with, and connect to a TH-D75 class radio over SPP.
   - Maintain stable connection, detect disconnects, and auto-reconnect.
@@ -123,22 +137,26 @@ radio design work here; roll up only cross-project dependencies to
   - Implement a connection state machine with idle, pairing, connected,
     reconnecting, error handling, timeout recovery, and operator-visible state.
 
-- `SB-040` Implement BLE iPhone connectivity.
-  - Expose Sideband as a BLE UART device.
-  - Provide BLE advertising and Nordic UART Service compatible TX/RX
-    characteristics.
-  - Validate iPhone discoverability and stable reconnect behavior.
+- `SB-040` Implement USB-C iPhone/client connectivity.
+  - Expose Sideband packet relay over the USB serial data path.
+  - Keep diagnostics out of the packet stream while USB mode is active.
+  - Validate KISS frame pass-through, reconnect behavior, and iPhone adapter
+    workflows.
 
-- `SB-042` Research BLE MTU handling.
-  - Research BLE MTU handling for KISS packets, including fragmentation,
-    binary payload handling, packet framing, and iOS limitations.
+- `SB-042` Remove BLE/iOS discovery transport from the primary firmware.
+  - Drop BLE UART, HID discovery mode, NimBLE dependency, and BLE diagnostic
+    build targets from the supported path.
+  - Preserve Bluetooth Classic only for radio-side connectivity.
+  - Document BLE as deferred or unsupported unless a separate coprocessor
+    architecture is introduced.
 
 - `SB-050` Implement KISS protocol middleware.
   - Add KISS parser and serializer support for FEND, FESC, TFEND, TFESC, packet
     escaping, and malformed-frame handling.
 
 - `SB-051` Create transparent packet relay.
-  - Relay radio to BLE and BLE to radio while preserving packet integrity.
+  - Relay radio to USB-C/Wi-Fi clients and clients to radio while preserving
+    packet integrity.
 
 - `SB-052` Implement packet logging.
   - Add concurrent buffering, TX/RX counters, serial debug logging, optional hex
@@ -168,7 +186,7 @@ radio design work here; roll up only cross-project dependencies to
 
 - `SB-092` Create field operations manual.
   - TH-D75 pairing.
-  - iPhone BLE connection.
+  - iPhone USB-C serial and Wi-Fi TCP connection.
   - APRS setup.
   - Troubleshooting and recovery procedures.
 
@@ -185,8 +203,8 @@ radio design work here; roll up only cross-project dependencies to
     field deployment mounting.
 
 - `SB-070` Add Wi-Fi TCP KISS support.
-  - Add TCP server mode, configurable port, Wi-Fi AP mode, and Wi-Fi client
-    mode.
+  - Add TCP server mode, configurable port, Wi-Fi AP mode, and future Wi-Fi
+    client mode.
   - Define multiple-client behavior and packet ownership rules.
 
 - `SB-071` Add onboard web configuration.
@@ -219,7 +237,8 @@ radio design work here; roll up only cross-project dependencies to
     test reconnect scenarios.
 - `SB-041` Validate iOS packet application compatibility.
   - Test RadioMail, APRS applications, and Packet Commander where feasible.
-  - Confirm packet integrity and reconnect behavior.
+  - Confirm packet integrity and reconnect behavior over USB-C serial and
+    Wi-Fi TCP.
 - `SB-061` Perform long-duration field testing.
   - Target 24+ hour runtime, reconnect recovery, packet loss metrics, memory
     leak checks, and Bluetooth recovery validation.

@@ -2,16 +2,16 @@
 
 Sideband is a small packet bridge between radio equipment and mobile operator
 tools. The first implementation target is a Kenwood TH-D75 class radio paired
-to an original ESP32 over Bluetooth Classic SPP, with the ESP32 exposing a BLE
-UART service to an iPhone or tablet.
+to an original ESP32 over Bluetooth Classic SPP, with the ESP32 exposing USB-C
+serial or Wi-Fi TCP service to an iPhone or tablet.
 
 ## System Roles
 
 ```text
 Radio              Sideband bridge                 Mobile client
 -----              ---------------                 -------------
-TH-D75 SPP   <->   ESP32 Bluetooth Classic   <->   BLE UART app
-KISS frames        KISS relay + counters           Packet workflow
+TH-D75 SPP   <->   ESP32 Bluetooth Classic   <->   USB/Wi-Fi app
+KISS frames        KISS relay + counters           USB/Wi-Fi packet workflow
 ```
 
 - Radio: owns RF transmission, receive, and TNC behavior.
@@ -30,17 +30,17 @@ original ESP32 family device such as ESP32-WROOM, ESP32-WROVER, or ESP32-D0WD.
 ESP32-S3, ESP32-C3, and ESP32-C6 do not support Bluetooth Classic and are not
 primary bridge targets.
 
-### BLE UART
+### USB-C Serial
 
-The mobile-facing transport starts with Nordic UART Service compatible BLE
-characteristics:
+USB-C serial is the default mobile-facing transport. While USB mode is active,
+the serial path is treated as packet data and periodic diagnostics are
+suppressed to avoid corrupting KISS traffic.
 
-- Service UUID: `6e400001-b5a3-f393-e0a9-e50e24dcca9e`
-- RX characteristic: `6e400002-b5a3-f393-e0a9-e50e24dcca9e`
-- TX characteristic: `6e400003-b5a3-f393-e0a9-e50e24dcca9e`
+### Wi-Fi TCP KISS
 
-BLE MTU and fragmentation rules need validation before large KISS frames are
-considered reliable.
+Wi-Fi mode exposes a local access point and TCP relay for mobile clients. The
+initial firmware uses AP mode and a configurable TCP port; station mode and
+multi-client ownership rules remain future work.
 
 ### KISS Relay
 
@@ -60,7 +60,7 @@ the bridge. Payload hex dumps should be opt-in only.
 Initial diagnostics should stay small:
 
 - Connection state: idle, pairing, connected, reconnecting, error.
-- Counters: radio to BLE, BLE to radio, malformed frames, reconnects.
+- Counters: radio to client, client to radio, malformed frames, reconnects.
 - Timing: last packet time, uptime, reconnect age.
 - Hardware: board profile, battery hook, display profile.
 
@@ -77,7 +77,6 @@ enables diagnostic capture for a controlled test.
 
 ## Future Expansion
 
-- Wi-Fi TCP KISS for laptops and local tools.
 - Web configuration portal for pairing and status.
 - MQTT telemetry for bridge health and counters.
 - Reticulum, Meshtastic, and TAK research as gateway experiments.
