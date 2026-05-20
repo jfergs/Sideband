@@ -53,6 +53,7 @@ constexpr uint32_t BUTTON_DEBOUNCE_MS = 45;
 constexpr uint32_t DISPLAY_REFRESH_MS = 250;
 constexpr uint32_t RADIO_CONNECT_INTERVAL_MS = 15000;
 constexpr uint32_t RADIO_SCAN_TIMEOUT_MS = 6000;
+constexpr uint32_t RADIO_TEST_TIMEOUT_MS = 3000;
 constexpr char SETTINGS_NAMESPACE[] = "sideband";
 constexpr char ACTIVE_MODE_KEY[] = "mode";
 constexpr char RADIO_MAC_KEY[] = "radio_mac";
@@ -88,9 +89,18 @@ enum class TowerIconMode : uint8_t {
   Arcs,
 };
 
+enum class RadioTestState : uint8_t {
+  Idle,
+  Wait,
+  RxOk,
+  NoData,
+  NoLink,
+};
+
 ClientMode selectedMode = ClientMode::Usb;
 ClientMode activeMode = ClientMode::Usb;
 RadioState radioState = RadioState::Disabled;
+RadioTestState radioTestState = RadioTestState::Idle;
 String radioPeerName = "";
 String radioPeerAddress = "";
 String radioTargetName = "";
@@ -100,6 +110,9 @@ char radioPairingCode[8] = "";
 uint32_t radioConnectAttempts = 0;
 uint32_t radioReconnects = 0;
 uint32_t radioPairingEvents = 0;
+uint32_t radioTestStartedMs = 0;
+uint32_t radioTestTxCount = 0;
+uint32_t radioTestRxCount = 0;
 
 void renderDisplay();
 
@@ -145,6 +158,22 @@ const char *radioStateName(RadioState state) {
   return "?";
 }
 
+const char *radioTestStateName(RadioTestState state) {
+  switch (state) {
+    case RadioTestState::Idle:
+      return "-";
+    case RadioTestState::Wait:
+      return "TEST WAIT";
+    case RadioTestState::RxOk:
+      return "TEST OK";
+    case RadioTestState::NoData:
+      return "NO DATA";
+    case RadioTestState::NoLink:
+      return "NO LINK";
+  }
+  return "?";
+}
+
 ClientMode nextMode(ClientMode mode) {
   return mode == ClientMode::Usb ? ClientMode::Wifi : ClientMode::Usb;
 }
@@ -164,6 +193,14 @@ void setRadioState(RadioState state) {
     return;
   }
   radioState = state;
+  displayDirty = true;
+}
+
+void setRadioTestState(RadioTestState state) {
+  if (radioTestState == state) {
+    return;
+  }
+  radioTestState = state;
   displayDirty = true;
 }
 
@@ -379,6 +416,11 @@ void relayRadioToClient() {
     return;
   }
 
+  if (radioTestState == RadioTestState::Wait) {
+    radioTestRxCount++;
+    setRadioTestState(RadioTestState::RxOk);
+  }
+
   if (activeMode == ClientMode::Wifi) {
     if (wifiClient && wifiClient.connected()) {
       wifiClient.write(buffer, len);
@@ -391,6 +433,31 @@ void relayRadioToClient() {
   Serial.write(buffer, len);
   radioToClientCount++;
   displayDirty = true;
+}
+
+void startRadioLinkTest() {
+  static const uint8_t testFrame[] = {KISS_FEND, 0x00, KISS_FEND};
+
+  if (radioState != RadioState::Connected || !radioSerial.connected()) {
+    setRadioTestState(RadioTestState::NoLink);
+    radioTestStartedMs = millis();
+    return;
+  }
+
+  radioSerial.write(testFrame, sizeof(testFrame));
+  radioTestTxCount++;
+  radioTestStartedMs = millis();
+  setRadioTestState(RadioTestState::Wait);
+}
+
+void maintainRadioLinkTest() {
+  if (radioTestState != RadioTestState::Wait) {
+    return;
+  }
+
+  if (millis() - radioTestStartedMs >= RADIO_TEST_TIMEOUT_MS) {
+    setRadioTestState(RadioTestState::NoData);
+  }
 }
 
 void relayWifiToRadio() {
@@ -425,6 +492,7 @@ void printSerialHelp() {
   Serial.println("  mode usb");
   Serial.println("  mode wifi");
   Serial.println("  radio show");
+  Serial.println("  radio test");
   Serial.println("  radio mac <AA:BB:CC:DD:EE:FF>");
   Serial.println("  radio name <name>");
   Serial.println("  radio alt <name>");
@@ -513,6 +581,11 @@ void handleSerialCommand(const String &command) {
 
   if (command == "radio show") {
     printRadioConfig();
+    return;
+  }
+
+  if (command == "radio test") {
+    startRadioLinkTest();
     return;
   }
 
@@ -612,7 +685,11 @@ void handleButtons() {
   }
 
   if (buttonPressed(BUTTON_SELECT_PIN, selectStable, selectChangedMs)) {
-    saveModeAndRestart(selectedMode);
+    if (selectedMode != activeMode) {
+      saveModeAndRestart(selectedMode);
+      return;
+    }
+    startRadioLinkTest();
   }
 }
 
@@ -743,7 +820,7 @@ void drawDisplayFrame() {
   drawStaticLabel(86, 58, "SELECT");
   drawStaticLabel(6, 98, "LINK");
   drawStaticLabel(6, 138, "RADIO");
-  drawStaticLabel(6, 168, "PAIR");
+  drawStaticLabel(6, 168, "TEST");
   drawStaticLabel(86, 168, "COUNTERS");
   drawStaticLabel(6, 198, "DEVICES");
 }
@@ -756,7 +833,7 @@ void renderDisplay() {
   static char previousSelectedMode[16] = "";
   static char previousClientStatus[32] = "";
   static char previousRadioStatus[32] = "";
-  static char previousPairingStatus[16] = "";
+  static char previousTestStatus[16] = "";
   static char previousCounters[32] = "";
   static char previousClientDevice[32] = "";
   static char previousRadioDevice[32] = "";
@@ -806,10 +883,17 @@ void renderDisplay() {
   copyPreviousValue(previousRadioStatus, sizeof(previousRadioStatus), radioStatus);
   drawRadioTowerIcon(radioState);
 
-  const char *pairingStatus = radioPairingCode[0] != '\0' ? radioPairingCode : "-";
-  drawValueField(6, 184, 72, pairingStatus, previousPairingStatus,
-                 radioPairingCode[0] != '\0' ? TFT_ORANGE : TFT_DARKGREY);
-  copyPreviousValue(previousPairingStatus, sizeof(previousPairingStatus), pairingStatus);
+  const char *testStatus = radioPairingCode[0] != '\0' ? radioPairingCode : radioTestStateName(radioTestState);
+  uint16_t testColor = TFT_DARKGREY;
+  if (radioPairingCode[0] != '\0' || radioTestState == RadioTestState::Wait) {
+    testColor = TFT_ORANGE;
+  } else if (radioTestState == RadioTestState::RxOk) {
+    testColor = TFT_GREEN;
+  } else if (radioTestState == RadioTestState::NoData || radioTestState == RadioTestState::NoLink) {
+    testColor = TFT_RED;
+  }
+  drawValueField(6, 184, 76, testStatus, previousTestStatus, testColor);
+  copyPreviousValue(previousTestStatus, sizeof(previousTestStatus), testStatus);
 
   char counts[32];
   snprintf(counts, sizeof(counts), "RX %lu TX %lu",
@@ -865,13 +949,16 @@ void printStatus() {
   lastStatusMs = now;
 
   Serial.printf(
-      "SIDEBAND status=running mode=%s selected=%s wifi=%s radio=%s radio_peer=\"%s\" pair=\"%s\" pair_events=%lu attempts=%lu reconnects=%lu radio_to_client=%lu client_to_radio=%lu\n",
+      "SIDEBAND status=running mode=%s selected=%s wifi=%s radio=%s radio_peer=\"%s\" pair=\"%s\" test=%s test_tx=%lu test_rx=%lu pair_events=%lu attempts=%lu reconnects=%lu radio_to_client=%lu client_to_radio=%lu\n",
       modeName(activeMode),
       modeName(selectedMode),
       activeMode == ClientMode::Wifi ? WiFi.softAPIP().toString().c_str() : "off",
       radioStateName(radioState),
       radioPeerName.c_str(),
       radioPairingCode[0] != '\0' ? radioPairingCode : "-",
+      radioTestStateName(radioTestState),
+      static_cast<unsigned long>(radioTestTxCount),
+      static_cast<unsigned long>(radioTestRxCount),
       static_cast<unsigned long>(radioPairingEvents),
       static_cast<unsigned long>(radioConnectAttempts),
       static_cast<unsigned long>(radioReconnects),
@@ -896,6 +983,7 @@ void setup() {
 void loop() {
   handleButtons();
   maintainRadioConnection();
+  maintainRadioLinkTest();
   maintainWifiClient();
   relayUsbToRadio();
   relayWifiToRadio();
