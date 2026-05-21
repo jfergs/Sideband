@@ -30,6 +30,17 @@ python3 scripts/kiss-exerciser.py --malformed
 python3 scripts/kiss-exerciser.py --raw-text TEST --cr
 ```
 
+## Bench Validation Notes
+
+- TH-D75 APRS mode with `Menu 590 = Raw Packets` and `Menu 982 = Bluetooth`
+  emits raw APRS text over the Bluetooth SPP link.
+- TH-D75 KISS12 mode with KISS output on Bluetooth emits KISS-framed AX.25
+  packets when the radio TNC produces packet output.
+- Sideband bench validation has confirmed Wi-Fi TCP KISS frames reach the radio,
+  malformed KISS escapes are counted without wedging the relay, escaped FEND and
+  FESC payloads pass, and radio-originated KISS frames forward to a connected
+  TCP client.
+
 ## Privacy Defaults
 
 - Packet payload dumps are opt-in diagnostics.

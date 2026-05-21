@@ -171,15 +171,21 @@ radio design work here; roll up only cross-project dependencies to
     - Client frames are decoded, re-escaped, and serialized onto the radio link.
     - Malformed or oversized client frames are dropped and counted without
       logging payload bytes.
+    - Bench validation against the TH-D75 confirmed Wi-Fi TCP KISS client frames
+      reach the radio, malformed escapes are counted, escaped FEND/FESC payloads
+      pass, and KISS12 radio frames are observed over Bluetooth.
   - Remaining acceptance criteria:
-    - Validate escaped frame pass-through against the TH-D75 and mobile packet
-      apps.
-    - Add host-side parser tests or a firmware-adjacent harness for malformed
-      frame cases.
+    - Validate the same KISS path with an iOS APRS packet app.
+    - Add automated host-side parser tests beyond the bench exerciser.
 
 - `SB-051` Create transparent packet relay.
   - Relay radio to USB-C/Wi-Fi clients and clients to radio while preserving
     packet integrity.
+  - Bench validation:
+    - APRS mode with `Menu 590 = Raw Packets` and `Menu 982 = Bluetooth`
+      produced raw APRS text over Bluetooth and through the Sideband RX buffer.
+    - KISS12 mode produced KISS-framed radio output over Bluetooth; with a TCP
+      client connected, Sideband forwarded the frame to Wi-Fi TCP.
 
 - `SB-052` Implement packet logging.
   - Add concurrent buffering, TX/RX counters, serial debug logging, optional hex
