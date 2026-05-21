@@ -176,8 +176,10 @@ radio design work here; roll up only cross-project dependencies to
     - Bench validation against the TH-D75 confirmed Wi-Fi TCP KISS client frames
       reach the radio, malformed escapes are counted, escaped FEND/FESC payloads
       pass, and KISS12 radio frames are observed over Bluetooth.
+    - iOS APRS app validation confirmed the Sideband TCP KISS endpoint can be
+      selected as a TNC, send KISS frames to the TH-D75, receive KISS frames from
+      the TH-D75, and display decoded APRS messages.
   - Remaining acceptance criteria:
-    - Validate the same KISS path with an iOS APRS packet app.
     - Add automated host-side parser tests beyond the bench exerciser.
 
 - `SB-051` Create transparent packet relay.
@@ -188,6 +190,8 @@ radio design work here; roll up only cross-project dependencies to
       produced raw APRS text over Bluetooth and through the Sideband RX buffer.
     - KISS12 mode produced KISS-framed radio output over Bluetooth; with a TCP
       client connected, Sideband forwarded the frame to Wi-Fi TCP.
+    - iOS app monitor mode decoded APRS packets through the Sideband TNC over
+      Wi-Fi TCP KISS.
 
 - `SB-052` Implement packet logging.
   - Add concurrent buffering, TX/RX counters, serial debug logging, optional hex

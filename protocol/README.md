@@ -46,6 +46,8 @@ python3 scripts/kiss-exerciser.py --raw-text TEST --cr
   malformed KISS escapes are counted without wedging the relay, escaped FEND and
   FESC payloads pass, and radio-originated KISS frames forward to a connected
   TCP client.
+- iOS APRS app validation has confirmed the `sideband` TNC over Wi-Fi TCP KISS
+  can receive and decode APRS packets forwarded from the TH-D75.
 
 ## Privacy Defaults
 
