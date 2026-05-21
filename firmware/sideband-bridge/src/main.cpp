@@ -57,10 +57,12 @@ constexpr uint8_t KISS_FEND = 0xC0;
 constexpr uint8_t KISS_FESC = 0xDB;
 constexpr uint8_t KISS_TFEND = 0xDC;
 constexpr uint8_t KISS_TFESC = 0xDD;
+constexpr uint8_t KISS_CMD_SET_HARDWARE = 0x06;
 constexpr size_t KISS_MAX_FRAME_BYTES = 330;
 constexpr size_t RADIO_RX_BUFFER_BYTES = 512;
 constexpr uint32_t BUTTON_DEBOUNCE_MS = 45;
 constexpr uint32_t DISPLAY_REFRESH_MS = 250;
+constexpr uint32_t MODE_PREVIEW_TIMEOUT_MS = 5000;
 constexpr uint32_t RADIO_CONNECT_INTERVAL_MS = 15000;
 constexpr uint32_t RADIO_SCAN_TIMEOUT_MS = 6000;
 constexpr uint32_t RADIO_TEST_TIMEOUT_MS = 3000;
@@ -100,12 +102,6 @@ enum class TcpIngressMode : uint8_t {
   Raw = 1,
 };
 
-enum class TowerIconMode : uint8_t {
-  Question,
-  Lightning,
-  Arcs,
-};
-
 enum class RadioTestState : uint8_t {
   Idle,
   Wait,
@@ -116,6 +112,7 @@ enum class RadioTestState : uint8_t {
 
 ClientMode selectedMode = ClientMode::Usb;
 ClientMode activeMode = ClientMode::Usb;
+uint32_t selectedModePreviewStartedMs = 0;
 TcpIngressMode tcpIngressMode = TcpIngressMode::Kiss;
 RadioState radioState = RadioState::Disabled;
 RadioTestState radioTestState = RadioTestState::Idle;
@@ -140,6 +137,8 @@ uint32_t kissClientByteCount = 0;
 uint32_t kissRadioFrameCount = 0;
 uint32_t kissRadioByteCount = 0;
 char kissLastError[24] = "-";
+uint32_t catHardwareCommandCount = 0;
+char catLastHardwareCommand[96] = "-";
 uint8_t radioRxBuffer[RADIO_RX_BUFFER_BYTES];
 size_t radioRxBufferStart = 0;
 size_t radioRxBufferLength = 0;
@@ -220,6 +219,45 @@ void writeKissFrameToRadio(const uint8_t *payload, size_t length) {
   displayDirty = true;
 }
 
+void rememberHardwareCommand(const uint8_t *payload, size_t length) {
+  catHardwareCommandCount++;
+  size_t offset = 0;
+  for (size_t i = 0; i < length && offset + 4 < sizeof(catLastHardwareCommand); i++) {
+    int written = snprintf(catLastHardwareCommand + offset,
+                           sizeof(catLastHardwareCommand) - offset,
+                           "%02X", payload[i]);
+    if (written <= 0) {
+      break;
+    }
+    offset += static_cast<size_t>(written);
+    if (i + 1 < length && offset + 2 < sizeof(catLastHardwareCommand)) {
+      catLastHardwareCommand[offset++] = ' ';
+      catLastHardwareCommand[offset] = '\0';
+    }
+  }
+  catLastHardwareCommand[sizeof(catLastHardwareCommand) - 1] = '\0';
+  displayDirty = true;
+  if (serialDiagnosticsEnabled()) {
+    Serial.printf("SIDEBAND cat hardware command bytes=%u payload=%s\n",
+                  static_cast<unsigned>(length),
+                  catLastHardwareCommand);
+  }
+}
+
+void handleKissFrameFromClient(const uint8_t *payload, size_t length) {
+  if (length == 0) {
+    return;
+  }
+
+  uint8_t command = payload[0] & 0x0f;
+  if (command == KISS_CMD_SET_HARDWARE) {
+    rememberHardwareCommand(payload, length);
+    return;
+  }
+
+  writeKissFrameToRadio(payload, length);
+}
+
 void resetKissIngress(KissIngress &ingress) {
   ingress.length = 0;
   ingress.escaped = false;
@@ -239,7 +277,7 @@ bool appendKissByte(KissIngress &ingress, uint8_t value) {
 bool processKissIngressByte(KissIngress &ingress, uint8_t value) {
   if (value == KISS_FEND) {
     if (ingress.inFrame && ingress.length > 0 && !ingress.malformed) {
-      writeKissFrameToRadio(ingress.buffer, ingress.length);
+      handleKissFrameFromClient(ingress.buffer, ingress.length);
     } else if (ingress.malformed) {
       kissMalformedCount++;
       displayDirty = true;
@@ -328,7 +366,7 @@ const char *modeName(ClientMode mode) {
     case ClientMode::Usb:
       return "USB-C";
     case ClientMode::Wifi:
-      return "Wi-Fi";
+      return "WiFi";
   }
   return "?";
 }
@@ -719,7 +757,8 @@ void relayWifiToRadio() {
 bool isCommandPrefix(const String &input) {
   return input == "help" || input == "?" || input == "status" ||
          input.startsWith("radio ") || input.startsWith("mode ") ||
-         input.startsWith("tcp ") || input.startsWith("kiss ");
+         input.startsWith("tcp ") || input.startsWith("kiss ") ||
+         input.startsWith("cat ");
 }
 
 void printSerialHelp() {
@@ -734,6 +773,8 @@ void printSerialHelp() {
   Serial.println("  tcp raw");
   Serial.println("  kiss stats");
   Serial.println("  kiss reset");
+  Serial.println("  cat stats");
+  Serial.println("  cat reset");
   Serial.println("  radio show");
   Serial.println("  radio test");
   Serial.println("  radio dump");
@@ -782,6 +823,24 @@ void resetKissStats() {
   resetKissIngress(radioKissMonitor);
   displayDirty = true;
   logLine("SIDEBAND kiss stats reset");
+}
+
+void printCatStats() {
+  if (!serialDiagnosticsEnabled()) {
+    return;
+  }
+
+  Serial.printf("SIDEBAND cat hardware_commands=%lu last=\"%s\"\n",
+                static_cast<unsigned long>(catHardwareCommandCount),
+                catLastHardwareCommand);
+}
+
+void resetCatStats() {
+  catHardwareCommandCount = 0;
+  strncpy(catLastHardwareCommand, "-", sizeof(catLastHardwareCommand));
+  catLastHardwareCommand[sizeof(catLastHardwareCommand) - 1] = '\0';
+  displayDirty = true;
+  logLine("SIDEBAND cat stats reset");
 }
 
 void saveRadioTargetMac(const String &mac) {
@@ -936,6 +995,16 @@ void handleSerialCommand(const String &command) {
     return;
   }
 
+  if (command == "cat stats") {
+    printCatStats();
+    return;
+  }
+
+  if (command == "cat reset") {
+    resetCatStats();
+    return;
+  }
+
   if (command == "radio show") {
     printRadioConfig();
     return;
@@ -1039,6 +1108,7 @@ void handleButtons() {
 
   if (buttonPressed(BUTTON_NEXT_PIN, nextStable, nextChangedMs)) {
     selectedMode = nextMode(selectedMode);
+    selectedModePreviewStartedMs = millis();
     displayDirty = true;
   }
 
@@ -1049,153 +1119,90 @@ void handleButtons() {
     }
     startRadioLinkTest();
   }
+
+  if (selectedMode != activeMode && selectedModePreviewStartedMs != 0 &&
+      millis() - selectedModePreviewStartedMs > MODE_PREVIEW_TIMEOUT_MS) {
+    selectedMode = activeMode;
+    selectedModePreviewStartedMs = 0;
+    displayDirty = true;
+  }
 }
 
 #ifdef SIDEBAND_HAS_TFT
-void drawStaticLabel(int16_t x, int16_t y, const char *label) {
-  tft.setTextColor(TFT_DARKGREY, TFT_BLACK);
+bool radioConnectedForDisplay() {
+  return radioState == RadioState::Connected && radioSerial.connected();
+}
+
+bool clientConnectedForDisplay() {
+  if (activeMode == ClientMode::Usb) {
+    return true;
+  }
+  return WiFi.softAPgetStationNum() > 0 || (wifiClient && wifiClient.connected());
+}
+
+uint16_t towerStatusColor(uint32_t now) {
+  bool radioConnected = radioConnectedForDisplay();
+  bool clientConnected = clientConnectedForDisplay();
+  if (radioConnected && clientConnected) {
+    return TFT_GREEN;
+  }
+  if (radioConnected || clientConnected) {
+    return TFT_YELLOW;
+  }
+  return ((now / 500) % 2) == 0 ? TFT_RED : TFT_BLACK;
+}
+
+void drawTinyRadioTower(uint16_t foreground, uint16_t background) {
+  static uint16_t previousForeground = 0xffff;
+  static bool previousRadioConnected = false;
+  bool radioConnected = radioConnectedForDisplay();
+  if (foreground == previousForeground && radioConnected == previousRadioConnected) {
+    return;
+  }
+
+  constexpr int16_t originX = 204;
+  constexpr int16_t originY = 6;
+  constexpr int16_t towerX = originX + 15;
+  constexpr int16_t towerTop = originY + 6;
+  constexpr int16_t towerBottom = originY + 32;
+  tft.fillRect(originX, originY, 34, 36, background);
+  tft.drawLine(towerX, towerTop, towerX, towerBottom, foreground);
+  tft.drawLine(towerX, towerTop + 5, towerX - 10, towerBottom, foreground);
+  tft.drawLine(towerX, towerTop + 5, towerX + 10, towerBottom, foreground);
+  tft.drawLine(towerX - 7, towerBottom - 7, towerX + 7, towerBottom - 7, foreground);
+  tft.drawLine(towerX - 5, towerBottom, towerX + 5, towerBottom, foreground);
+  tft.fillCircle(towerX, towerTop, radioConnected ? 4 : 2, foreground);
+  previousForeground = foreground;
+  previousRadioConnected = radioConnected;
+}
+
+void drawLineText(int16_t x, int16_t y, const char *label, const char *value,
+                  uint16_t foreground, uint16_t background, char *previous,
+                  size_t previousSize) {
+  char line[48];
+  snprintf(line, sizeof(line), "%s:%s", label, value);
+  if (strncmp(line, previous, previousSize) == 0) {
+    return;
+  }
+
+  tft.fillRect(x, y, 196, 18, background);
+  tft.setTextColor(foreground, background);
   tft.drawString(label, x, y, 2);
-}
-
-void drawValueField(int16_t x, int16_t y, int16_t width, const char *value, const char *previous, uint16_t color) {
-  if (strcmp(value, previous) == 0) {
-    return;
-  }
-
-  tft.fillRect(x, y, width, 18, TFT_BLACK);
-  tft.setTextColor(color, TFT_BLACK);
-  tft.drawString(value, x, y, 2);
-}
-
-void copyPreviousValue(char *target, size_t targetSize, const char *value) {
-  strncpy(target, value, targetSize - 1);
-  target[targetSize - 1] = '\0';
-}
-
-uint16_t radioStateColor(RadioState state) {
-  switch (state) {
-    case RadioState::Connected:
-      return TFT_GREEN;
-    case RadioState::Pairing:
-      return TFT_ORANGE;
-    case RadioState::Connecting:
-    case RadioState::Reconnecting:
-      return TFT_YELLOW;
-    case RadioState::Error:
-      return TFT_RED;
-    case RadioState::Disabled:
-      return TFT_DARKGREY;
-    case RadioState::Scanning:
-    case RadioState::Idle:
-      return TFT_CYAN;
-  }
-  return TFT_WHITE;
-}
-
-TowerIconMode towerIconMode() {
-  if (radioState == RadioState::Connected &&
-      (activeMode == ClientMode::Usb || (wifiClient && wifiClient.connected()))) {
-    return TowerIconMode::Arcs;
-  }
-  if (radioState == RadioState::Connecting || radioState == RadioState::Reconnecting ||
-      radioState == RadioState::Pairing || radioState == RadioState::Connected) {
-    return TowerIconMode::Lightning;
-  }
-  return TowerIconMode::Question;
-}
-
-void drawRadioTowerIcon(RadioState state) {
-  constexpr int16_t originX = 186;
-  constexpr int16_t originY = 36;
-  constexpr int16_t width = 48;
-  constexpr int16_t height = 74;
-  constexpr int16_t towerX = originX + 24;
-  constexpr int16_t towerTop = originY + 20;
-  constexpr int16_t towerBottom = originY + 58;
-  uint16_t color = radioStateColor(state);
-  bool animationsEnabled = SIDEBAND_TFT_ANIMATIONS;
-  TowerIconMode mode = towerIconMode();
-  static bool iconDrawn = false;
-  static RadioState previousState = RadioState::Error;
-  static TowerIconMode previousMode = TowerIconMode::Question;
-  if (!animationsEnabled && iconDrawn && state == previousState && mode == previousMode) {
-    return;
-  }
-
-  uint8_t frame = animationsEnabled ? ((millis() / DISPLAY_REFRESH_MS) % 4) : 0;
-  int16_t pulse = static_cast<int16_t>(frame) * 3;
-
-  tft.fillRect(originX, originY, width, height, TFT_BLACK);
-  tft.drawLine(towerX, towerTop, towerX, towerBottom, color);
-  tft.drawLine(towerX, towerTop + 6, towerX - 12, towerBottom, color);
-  tft.drawLine(towerX, towerTop + 6, towerX + 12, towerBottom, color);
-  tft.drawLine(towerX - 9, towerBottom - 10, towerX + 9, towerBottom - 10, color);
-  tft.drawLine(towerX - 6, towerBottom, towerX + 6, towerBottom, color);
-  tft.fillCircle(towerX, towerTop, 3, color);
-
-  if (mode == TowerIconMode::Arcs) {
-    tft.drawArc(towerX, towerTop, 10 + pulse, 8 + pulse, 300, 60, color, TFT_BLACK, false);
-    tft.drawArc(towerX, towerTop, 18 + pulse, 16 + pulse, 300, 60, color, TFT_BLACK, false);
-    tft.drawArc(towerX, towerTop, 10 + pulse, 8 + pulse, 120, 240, color, TFT_BLACK, false);
-    tft.drawArc(towerX, towerTop, 18 + pulse, 16 + pulse, 120, 240, color, TFT_BLACK, false);
-  } else if (mode == TowerIconMode::Lightning) {
-    tft.drawLine(towerX - 18, towerTop - 14, towerX - 5, towerTop - 2, color);
-    tft.drawLine(towerX - 5, towerTop - 2, towerX - 12, towerTop + 2, color);
-    tft.drawLine(towerX - 12, towerTop + 2, towerX, towerTop, color);
-    tft.drawLine(towerX + 18, towerTop - 14, towerX + 5, towerTop - 2, color);
-    tft.drawLine(towerX + 5, towerTop - 2, towerX + 12, towerTop + 2, color);
-    tft.drawLine(towerX + 12, towerTop + 2, towerX, towerTop, color);
-  } else {
-    tft.drawCircle(towerX - 16, towerTop - 14, 3, color);
-    tft.drawLine(towerX - 14, towerTop - 12, towerX - 10, towerTop - 8, color);
-    tft.fillCircle(towerX - 8, towerTop - 6, 1, color);
-    tft.drawCircle(towerX + 16, towerTop - 14, 3, color);
-    tft.drawLine(towerX + 14, towerTop - 12, towerX + 10, towerTop - 8, color);
-    tft.fillCircle(towerX + 8, towerTop - 6, 1, color);
-  }
-
-  if (state == RadioState::Pairing) {
-    tft.drawString("PIN", originX + 12, originY + 2, 1);
-  } else if (state == RadioState::Connected) {
-    tft.fillCircle(towerX, towerTop, 5, color);
-  } else {
-    tft.fillCircle(towerX, towerTop, 2, color);
-  }
-
-  iconDrawn = true;
-  previousState = state;
-  previousMode = mode;
-}
-
-void drawDisplayFrame() {
-  tft.fillScreen(TFT_BLACK);
-  tft.setTextDatum(TL_DATUM);
-  tft.setTextColor(TFT_CYAN, TFT_BLACK);
-  tft.drawString("SIDEBAND", 6, 8, 2);
-
-  drawStaticLabel(6, 34, "CLIENT");
-  drawStaticLabel(6, 58, "ACTIVE");
-  drawStaticLabel(86, 58, "SELECT");
-  drawStaticLabel(6, 98, "LINK");
-  drawStaticLabel(6, 138, "RADIO");
-  drawStaticLabel(6, 168, "TEST");
-  drawStaticLabel(86, 168, "COUNTERS");
-  drawStaticLabel(6, 198, "DEVICES");
+  tft.drawString(value, x + 52, y, 2);
+  strncpy(previous, line, previousSize - 1);
+  previous[previousSize - 1] = '\0';
 }
 
 void renderDisplay() {
   static uint32_t lastDrawMs = 0;
-  static bool frameDrawn = false;
-  static char previousClient[32] = "";
-  static char previousActiveMode[16] = "";
-  static char previousSelectedMode[16] = "";
-  static char previousClientStatus[32] = "";
-  static char previousRadioStatus[32] = "";
-  static char previousTestStatus[16] = "";
-  static char previousCounters[32] = "";
-  static char previousClientDevice[32] = "";
-  static char previousRadioDevice[32] = "";
-  static char previousWifiSecret[32] = "";
+  static bool screenInitialized = false;
+  static ClientMode previousLayoutMode = ClientMode::Usb;
+  static char previousModeLine[48] = "";
+  static char previousSelectLine[48] = "";
+  static char previousLine1[48] = "";
+  static char previousLine2[48] = "";
+  static char previousLine3[48] = "";
+  static char previousLine4[48] = "";
   uint32_t now = millis();
   if (!displayDirty && now - lastDrawMs < DISPLAY_REFRESH_MS) {
     return;
@@ -1203,91 +1210,72 @@ void renderDisplay() {
   displayDirty = false;
   lastDrawMs = now;
 
-  if (!frameDrawn) {
-    drawDisplayFrame();
-    frameDrawn = true;
+  uint16_t background = TFT_BLACK;
+  uint16_t foreground = TFT_WHITE;
+  uint16_t towerColor = towerStatusColor(now);
+  bool previewMode = selectedMode != activeMode;
+  const char *displayMode = previewMode ? modeName(selectedMode) : modeName(activeMode);
+
+  tft.setTextDatum(TL_DATUM);
+  if (!screenInitialized || previousLayoutMode != activeMode) {
+    tft.fillScreen(background);
+    screenInitialized = true;
+    previousLayoutMode = activeMode;
+    previousModeLine[0] = '\0';
+    previousSelectLine[0] = '\0';
+    previousLine1[0] = '\0';
+    previousLine2[0] = '\0';
+    previousLine3[0] = '\0';
+    previousLine4[0] = '\0';
+  }
+  drawTinyRadioTower(towerColor, background);
+
+  char modeLine[32];
+  snprintf(modeLine, sizeof(modeLine), "%s", displayMode);
+  drawLineText(6, 8, "MODE", modeLine, foreground, background,
+               previousModeLine, sizeof(previousModeLine));
+  char selectLine[16];
+  snprintf(selectLine, sizeof(selectLine), "%s", previewMode ? "SELECT" : "");
+  if (strncmp(selectLine, previousSelectLine, sizeof(previousSelectLine)) != 0) {
+    tft.fillRect(150, 8, 64, 18, background);
+    strncpy(previousSelectLine, selectLine, sizeof(previousSelectLine) - 1);
+    previousSelectLine[sizeof(previousSelectLine) - 1] = '\0';
+  }
+  if (previewMode) {
+    tft.setTextColor(TFT_YELLOW, background);
+    tft.drawString("SELECT", 150, 8, 2);
+    tft.setTextColor(foreground, background);
   }
 
-  char clientLabel[32];
   if (activeMode == ClientMode::Wifi) {
-    snprintf(clientLabel, sizeof(clientLabel), "%.20s", wifiApSsid.length() > 0 ? wifiApSsid.c_str() : "Wi-Fi AP");
+    char ssid[32];
+    snprintf(ssid, sizeof(ssid), "%.18s", wifiApSsid.length() > 0 ? wifiApSsid.c_str() : "Wi-Fi AP");
+    drawLineText(6, 32, "SSID", ssid, foreground, background,
+                 previousLine1, sizeof(previousLine1));
+    drawLineText(6, 52, "PASS", SIDEBAND_WIFI_AP_PASSWORD, foreground, background,
+                 previousLine2, sizeof(previousLine2));
+
+    char link[32];
+    snprintf(link, sizeof(link), "WiFi %u RADIO %.8s",
+             static_cast<unsigned int>(WiFi.softAPgetStationNum()),
+             radioPeerName.length() > 0 ? radioPeerName.c_str() : radioTargetName.c_str());
+    drawLineText(6, 72, "LINK", link, foreground, background,
+                 previousLine3, sizeof(previousLine3));
+
+    char ip[32];
+    snprintf(ip, sizeof(ip), "%s",
+             WiFi.softAPIP().toString().c_str());
+    drawLineText(6, 92, "IP", ip, foreground, background,
+                 previousLine4, sizeof(previousLine4));
   } else {
-    snprintf(clientLabel, sizeof(clientLabel), "USB SERIAL");
+    drawLineText(6, 36, "USB", "SERIAL", foreground, background,
+                 previousLine1, sizeof(previousLine1));
+    char link[32];
+    snprintf(link, sizeof(link), "USB RADIO %.8s",
+             radioPeerName.length() > 0 ? radioPeerName.c_str() : radioTargetName.c_str());
+    drawLineText(6, 60, "LINK", link, foreground, background,
+                 previousLine2, sizeof(previousLine2));
   }
-  drawValueField(62, 34, 108, clientLabel, previousClient, TFT_GREEN);
-  copyPreviousValue(previousClient, sizeof(previousClient), clientLabel);
-
-  drawValueField(6, 74, 72, modeName(activeMode), previousActiveMode, TFT_YELLOW);
-  copyPreviousValue(previousActiveMode, sizeof(previousActiveMode), modeName(activeMode));
-
-  drawValueField(86, 74, 110, modeName(selectedMode), previousSelectedMode, TFT_ORANGE);
-  copyPreviousValue(previousSelectedMode, sizeof(previousSelectedMode), modeName(selectedMode));
-
-  char clientStatus[32];
-  if (activeMode == ClientMode::Wifi) {
-    snprintf(clientStatus, sizeof(clientStatus), "%s %s",
-             WiFi.softAPIP().toString().c_str(),
-             (wifiClient && wifiClient.connected()) ? "CLIENT" : "OPEN");
-  } else {
-    snprintf(clientStatus, sizeof(clientStatus), "SERIAL READY");
-  }
-  drawValueField(6, 114, 168, clientStatus, previousClientStatus, TFT_CYAN);
-  copyPreviousValue(previousClientStatus, sizeof(previousClientStatus), clientStatus);
-
-  char radioStatus[32];
-  snprintf(radioStatus, sizeof(radioStatus), "%s %s",
-           radioStateName(radioState),
-           radioPeerName.length() > 0 ? radioPeerName.c_str() : "");
-  drawValueField(6, 154, 180, radioStatus, previousRadioStatus, radioStateColor(radioState));
-  copyPreviousValue(previousRadioStatus, sizeof(previousRadioStatus), radioStatus);
-  drawRadioTowerIcon(radioState);
-
-  const char *testStatus = radioPairingCode[0] != '\0' ? radioPairingCode : radioTestStateName(radioTestState);
-  uint16_t testColor = TFT_DARKGREY;
-  if (radioPairingCode[0] != '\0' || radioTestState == RadioTestState::Wait) {
-    testColor = TFT_ORANGE;
-  } else if (radioTestState == RadioTestState::RxOk) {
-    testColor = TFT_GREEN;
-  } else if (radioTestState == RadioTestState::NoData || radioTestState == RadioTestState::NoLink) {
-    testColor = TFT_RED;
-  }
-  drawValueField(6, 184, 76, testStatus, previousTestStatus, testColor);
-  copyPreviousValue(previousTestStatus, sizeof(previousTestStatus), testStatus);
-
-  char counts[32];
-  snprintf(counts, sizeof(counts), "RX %lu TX %lu",
-           static_cast<unsigned long>(clientToRadioCount),
-           static_cast<unsigned long>(radioToClientCount));
-  drawValueField(86, 184, 148, counts, previousCounters, TFT_WHITE);
-  copyPreviousValue(previousCounters, sizeof(previousCounters), counts);
-
-  char clientDevice[32];
-  if (activeMode == ClientMode::Wifi) {
-    snprintf(clientDevice, sizeof(clientDevice), "%s %s",
-             (wifiClient && wifiClient.connected()) ? "TCP" : "AP",
-             mdnsStarted ? "MDNS" : "OPEN");
-    drawValueField(6, 214, 84, clientDevice, previousClientDevice, mdnsStarted ? TFT_GREEN : TFT_ORANGE);
-    copyPreviousValue(previousClientDevice, sizeof(previousClientDevice), clientDevice);
-
-    char wifiSecret[32];
-    snprintf(wifiSecret, sizeof(wifiSecret), "PW %.20s", SIDEBAND_WIFI_AP_PASSWORD);
-    drawValueField(96, 214, 138, wifiSecret, previousWifiSecret, TFT_GREEN);
-    copyPreviousValue(previousWifiSecret, sizeof(previousWifiSecret), wifiSecret);
-    copyPreviousValue(previousRadioDevice, sizeof(previousRadioDevice), "");
-    return;
-  }
-
-  snprintf(clientDevice, sizeof(clientDevice), "USB -");
-  drawValueField(6, 214, 84, clientDevice, previousClientDevice, TFT_GREEN);
-  copyPreviousValue(previousClientDevice, sizeof(previousClientDevice), clientDevice);
-
-  char radioDevice[32];
-  snprintf(radioDevice, sizeof(radioDevice), "RAD %.12s",
-           radioPeerName.length() > 0 ? radioPeerName.c_str() : radioTargetName.c_str());
-  drawValueField(96, 214, 114, radioDevice, previousRadioDevice,
-                 radioState == RadioState::Connected ? TFT_GREEN : TFT_DARKGREY);
-  copyPreviousValue(previousRadioDevice, sizeof(previousRadioDevice), radioDevice);
-  copyPreviousValue(previousWifiSecret, sizeof(previousWifiSecret), "");
 }
 
 void setupDisplay() {
@@ -1322,7 +1310,7 @@ void printStatus() {
   lastStatusMs = now;
 
   Serial.printf(
-      "SIDEBAND status=running mode=%s selected=%s tcp=%s wifi=%s mdns=%s wifi_client=%s radio=%s radio_peer=\"%s\" pair=\"%s\" test=%s test_tx=%lu test_rx=%lu raw_cmds=%lu pair_events=%lu attempts=%lu reconnects=%lu radio_rx_bytes=%lu radio_rx_buf=%u radio_to_client=%lu client_to_radio=%lu kiss_tx=%lu kiss_rx=%lu kiss_malformed=%lu kiss_last=%s\n",
+      "SIDEBAND status=running mode=%s selected=%s tcp=%s wifi=%s mdns=%s wifi_client=%s radio=%s radio_peer=\"%s\" pair=\"%s\" test=%s test_tx=%lu test_rx=%lu raw_cmds=%lu cat_hw=%lu pair_events=%lu attempts=%lu reconnects=%lu radio_rx_bytes=%lu radio_rx_buf=%u radio_to_client=%lu client_to_radio=%lu kiss_tx=%lu kiss_rx=%lu kiss_malformed=%lu kiss_last=%s cat_last=\"%s\"\n",
       modeName(activeMode),
       modeName(selectedMode),
       tcpIngressModeName(tcpIngressMode),
@@ -1336,6 +1324,7 @@ void printStatus() {
       static_cast<unsigned long>(radioTestTxCount),
       static_cast<unsigned long>(radioTestRxCount),
       static_cast<unsigned long>(radioRawCommandCount),
+      static_cast<unsigned long>(catHardwareCommandCount),
       static_cast<unsigned long>(radioPairingEvents),
       static_cast<unsigned long>(radioConnectAttempts),
       static_cast<unsigned long>(radioReconnects),
@@ -1346,7 +1335,8 @@ void printStatus() {
       static_cast<unsigned long>(kissClientFrameCount),
       static_cast<unsigned long>(kissRadioFrameCount),
       static_cast<unsigned long>(kissMalformedCount),
-      kissLastError);
+      kissLastError,
+      catLastHardwareCommand);
 }
 
 }  // namespace

@@ -229,6 +229,18 @@ radio design work here; roll up only cross-project dependencies to
   - Compare USB-C battery packs, LiPo charging options, and NP-F integration.
   - Document current draw and runtime estimates for supported boards.
 
+- `SB-013` Investigate dual-radio ESP32 hardware architecture.
+  - Evaluate a dual-device design where an ESP32 with Bluetooth Classic owns
+    the radio SPP/KISS link and a second ESP32-S3-class device owns BLE,
+    display/UI, memory-heavy services, and app-facing control surfaces.
+  - Compare board-to-board transports: UART, SPI, I2C, and USB CDC.
+  - Define how Bluetooth Classic packet traffic, BLE control/discovery, CAT
+    commands, status telemetry, and firmware update workflows would be split.
+  - Assess memory pressure on the current ESP32 build versus ESP32-S3 PSRAM
+    options for UI, web configuration, logging, and future protocol services.
+  - Document whether a Bluetooth Classic-to-BLE bridge is feasible without
+    corrupting KISS timing or increasing field complexity too much.
+
 - `SB-080` Design portable enclosure.
   - Create compact field enclosure concepts with USB access, screen visibility,
     ventilation, MOLLE compatibility, and portable mounting options.
@@ -261,6 +273,18 @@ radio design work here; roll up only cross-project dependencies to
 - `SB-075` Research ATAK/TAK integration.
   - Evaluate APRS position forwarding, CoT event generation, GPS integration,
     and field mapping concepts.
+
+- `SB-076` Investigate CAT and Packet Commander frequency control.
+  - Determine whether Packet Commander exposes frequency control to generic TCP
+    KISS TNCs or only to specific supported radio/control profiles.
+  - Capture and decode any KISS SetHardware, B.B. Link-style, BLE, or separate
+    CAT/control commands emitted during Packet Commander frequency changes.
+  - Keep CAT/control handling separate from the working KISS packet relay unless
+    the app explicitly sends hardware-control frames through the TNC stream.
+  - Evaluate TH-D75 command support for setting VFO/frequency over Bluetooth
+    SPP while preserving APRS/KISS operation.
+  - If viable, implement a guarded CAT control path with clear serial
+    diagnostics, command counters, and a rollback/failsafe mode.
 
 ## Validation
 
