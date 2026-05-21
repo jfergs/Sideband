@@ -53,6 +53,7 @@ CODEOWNERS
 LICENSE
 docs/
   ARCHITECTURE.md
+  FIELD_VALIDATION.md
 enclosure/
 experiments/
 firmware/
@@ -61,6 +62,12 @@ hardware/
 protocol/
 references/
 ```
+
+## Documentation
+
+- [Architecture](docs/ARCHITECTURE.md)
+- [Developer setup](docs/DEVELOPER_SETUP.md)
+- [Field validation](docs/FIELD_VALIDATION.md)
 
 ## Development
 
