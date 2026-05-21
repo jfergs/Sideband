@@ -14,6 +14,9 @@ TCP KISS transports for mobile clients.
 - Wi-Fi TCP input defaults to KISS framing. For bench testing raw APRS output
   or TNC command streams, use the serial monitor commands `tcp raw` and
   `tcp kiss` to switch the persisted TCP ingress mode.
+- KISS diagnostics are available from the serial monitor with `kiss stats` and
+  `kiss reset`. `scripts/kiss-exerciser.py` can send known TCP KISS and raw
+  payloads to the bridge during bench tests.
 
 ## Safety Notes
 

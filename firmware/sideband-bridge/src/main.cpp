@@ -129,6 +129,11 @@ uint32_t radioRxByteCount = 0;
 uint32_t radioRxBufferWrites = 0;
 uint32_t radioRawCommandCount = 0;
 uint32_t kissMalformedCount = 0;
+uint32_t kissClientFrameCount = 0;
+uint32_t kissClientByteCount = 0;
+uint32_t kissRadioFrameCount = 0;
+uint32_t kissRadioByteCount = 0;
+char kissLastError[24] = "-";
 uint8_t radioRxBuffer[RADIO_RX_BUFFER_BYTES];
 size_t radioRxBufferStart = 0;
 size_t radioRxBufferLength = 0;
@@ -143,6 +148,7 @@ struct KissIngress {
 
 KissIngress usbKissIngress;
 KissIngress wifiKissIngress;
+KissIngress radioKissMonitor;
 
 void renderDisplay();
 
@@ -154,6 +160,11 @@ void logLine(const char *line) {
   if (serialDiagnosticsEnabled()) {
     Serial.println(line);
   }
+}
+
+void setKissLastError(const char *error) {
+  strncpy(kissLastError, error, sizeof(kissLastError) - 1);
+  kissLastError[sizeof(kissLastError) - 1] = '\0';
 }
 
 void rememberRadioRxBytes(const uint8_t *data, size_t length) {
@@ -197,6 +208,8 @@ void writeKissFrameToRadio(const uint8_t *payload, size_t length) {
     writeKissByteEscaped(radioSerial, payload[i]);
   }
   radioSerial.write(KISS_FEND);
+  kissClientFrameCount++;
+  kissClientByteCount += length;
   clientToRadioCount++;
   displayDirty = true;
 }
@@ -210,6 +223,7 @@ void resetKissIngress(KissIngress &ingress) {
 bool appendKissByte(KissIngress &ingress, uint8_t value) {
   if (ingress.length >= KISS_MAX_FRAME_BYTES) {
     ingress.malformed = true;
+    setKissLastError("frame_overflow");
     return false;
   }
   ingress.buffer[ingress.length++] = value;
@@ -248,6 +262,7 @@ bool processKissIngressByte(KissIngress &ingress, uint8_t value) {
       return true;
     }
     ingress.malformed = true;
+    setKissLastError("bad_escape");
     return true;
   }
 
@@ -258,6 +273,48 @@ bool processKissIngressByte(KissIngress &ingress, uint8_t value) {
 
   appendKissByte(ingress, value);
   return true;
+}
+
+void observeRadioKissByte(uint8_t value) {
+  if (value == KISS_FEND) {
+    if (radioKissMonitor.inFrame && radioKissMonitor.length > 0 && !radioKissMonitor.malformed) {
+      kissRadioFrameCount++;
+      kissRadioByteCount += radioKissMonitor.length;
+      displayDirty = true;
+    } else if (radioKissMonitor.malformed) {
+      kissMalformedCount++;
+      displayDirty = true;
+    }
+    radioKissMonitor.inFrame = true;
+    resetKissIngress(radioKissMonitor);
+    return;
+  }
+
+  if (!radioKissMonitor.inFrame || radioKissMonitor.malformed) {
+    return;
+  }
+
+  if (radioKissMonitor.escaped) {
+    radioKissMonitor.escaped = false;
+    if (value == KISS_TFEND) {
+      appendKissByte(radioKissMonitor, KISS_FEND);
+      return;
+    }
+    if (value == KISS_TFESC) {
+      appendKissByte(radioKissMonitor, KISS_FESC);
+      return;
+    }
+    radioKissMonitor.malformed = true;
+    setKissLastError("radio_bad_escape");
+    return;
+  }
+
+  if (value == KISS_FESC) {
+    radioKissMonitor.escaped = true;
+    return;
+  }
+
+  appendKissByte(radioKissMonitor, value);
 }
 
 const char *modeName(ClientMode mode) {
@@ -572,6 +629,9 @@ void relayRadioToClient() {
   }
   radioRxByteCount += len;
   rememberRadioRxBytes(buffer, len);
+  for (size_t i = 0; i < len; i++) {
+    observeRadioKissByte(buffer[i]);
+  }
   displayDirty = true;
 
   if (radioTestState == RadioTestState::Wait) {
@@ -643,7 +703,8 @@ void relayWifiToRadio() {
 
 bool isCommandPrefix(const String &input) {
   return input == "help" || input == "?" || input == "status" ||
-         input.startsWith("radio ") || input.startsWith("mode ") || input.startsWith("tcp ");
+         input.startsWith("radio ") || input.startsWith("mode ") ||
+         input.startsWith("tcp ") || input.startsWith("kiss ");
 }
 
 void printSerialHelp() {
@@ -656,6 +717,8 @@ void printSerialHelp() {
   Serial.println("  mode wifi");
   Serial.println("  tcp kiss");
   Serial.println("  tcp raw");
+  Serial.println("  kiss stats");
+  Serial.println("  kiss reset");
   Serial.println("  radio show");
   Serial.println("  radio test");
   Serial.println("  radio dump");
@@ -676,6 +739,34 @@ void printRadioConfig() {
                 radioTargetAltName.c_str(),
                 radioTargetMac.length() > 0 ? "configured" : "unset");
   Serial.printf("SIDEBAND tcp ingress=%s\n", tcpIngressModeName(tcpIngressMode));
+}
+
+void printKissStats() {
+  if (!serialDiagnosticsEnabled()) {
+    return;
+  }
+
+  Serial.printf("SIDEBAND kiss client_frames=%lu client_bytes=%lu radio_frames=%lu radio_bytes=%lu malformed=%lu last_error=%s\n",
+                static_cast<unsigned long>(kissClientFrameCount),
+                static_cast<unsigned long>(kissClientByteCount),
+                static_cast<unsigned long>(kissRadioFrameCount),
+                static_cast<unsigned long>(kissRadioByteCount),
+                static_cast<unsigned long>(kissMalformedCount),
+                kissLastError);
+}
+
+void resetKissStats() {
+  kissClientFrameCount = 0;
+  kissClientByteCount = 0;
+  kissRadioFrameCount = 0;
+  kissRadioByteCount = 0;
+  kissMalformedCount = 0;
+  setKissLastError("-");
+  resetKissIngress(usbKissIngress);
+  resetKissIngress(wifiKissIngress);
+  resetKissIngress(radioKissMonitor);
+  displayDirty = true;
+  logLine("SIDEBAND kiss stats reset");
 }
 
 void saveRadioTargetMac(const String &mac) {
@@ -817,6 +908,16 @@ void handleSerialCommand(const String &command) {
 
   if (command == "tcp raw") {
     saveTcpIngressMode(TcpIngressMode::Raw);
+    return;
+  }
+
+  if (command == "kiss stats") {
+    printKissStats();
+    return;
+  }
+
+  if (command == "kiss reset") {
+    resetKissStats();
     return;
   }
 
@@ -1191,7 +1292,7 @@ void printStatus() {
   lastStatusMs = now;
 
   Serial.printf(
-      "SIDEBAND status=running mode=%s selected=%s tcp=%s wifi=%s wifi_client=%s radio=%s radio_peer=\"%s\" pair=\"%s\" test=%s test_tx=%lu test_rx=%lu raw_cmds=%lu pair_events=%lu attempts=%lu reconnects=%lu radio_rx_bytes=%lu radio_rx_buf=%u radio_to_client=%lu client_to_radio=%lu kiss_malformed=%lu\n",
+      "SIDEBAND status=running mode=%s selected=%s tcp=%s wifi=%s wifi_client=%s radio=%s radio_peer=\"%s\" pair=\"%s\" test=%s test_tx=%lu test_rx=%lu raw_cmds=%lu pair_events=%lu attempts=%lu reconnects=%lu radio_rx_bytes=%lu radio_rx_buf=%u radio_to_client=%lu client_to_radio=%lu kiss_tx=%lu kiss_rx=%lu kiss_malformed=%lu kiss_last=%s\n",
       modeName(activeMode),
       modeName(selectedMode),
       tcpIngressModeName(tcpIngressMode),
@@ -1211,7 +1312,10 @@ void printStatus() {
       static_cast<unsigned>(radioRxBufferLength),
       static_cast<unsigned long>(radioToClientCount),
       static_cast<unsigned long>(clientToRadioCount),
-      static_cast<unsigned long>(kissMalformedCount));
+      static_cast<unsigned long>(kissClientFrameCount),
+      static_cast<unsigned long>(kissRadioFrameCount),
+      static_cast<unsigned long>(kissMalformedCount),
+      kissLastError);
 }
 
 }  // namespace

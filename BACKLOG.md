@@ -136,6 +136,10 @@ radio design work here; roll up only cross-project dependencies to
       `radio dump` inspection or `radio replay` to a connected Wi-Fi client.
     - Wi-Fi TCP ingress can be switched between default KISS framing and raw
       pass-through with `tcp kiss` / `tcp raw`.
+    - `kiss stats` and `kiss reset` expose KISS frame/byte counters and the
+      last parser error.
+    - `scripts/kiss-exerciser.py` sends known KISS, malformed KISS, and raw TCP
+      payloads to the bridge for bench validation.
 
 - `SB-031` Implement persistent pairing storage.
   - Store paired MAC address and restore previous connections from

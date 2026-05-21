@@ -21,6 +21,15 @@ TH-D75 class radio
 - Reject malformed frames without wedging the relay.
 - Track counters and errors without logging payload bytes by default.
 
+Bench exerciser:
+
+```bash
+python3 scripts/kiss-exerciser.py --payload-hex 00
+python3 scripts/kiss-exerciser.py --payload-hex '00 c0 db'
+python3 scripts/kiss-exerciser.py --malformed
+python3 scripts/kiss-exerciser.py --raw-text TEST --cr
+```
+
 ## Privacy Defaults
 
 - Packet payload dumps are opt-in diagnostics.
