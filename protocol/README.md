@@ -1,7 +1,8 @@
 # Protocol
 
 Sideband starts with transparent KISS packet relay between a radio-facing
-Bluetooth Classic SPP transport and a mobile-facing BLE UART transport.
+Bluetooth Classic SPP transport and mobile-facing USB-C serial or Wi-Fi TCP
+transports.
 
 ## Initial Flow
 
@@ -9,7 +10,7 @@ Bluetooth Classic SPP transport and a mobile-facing BLE UART transport.
 TH-D75 class radio
   <-> Bluetooth Classic SPP
   <-> Sideband ESP32 bridge
-  <-> BLE UART / Nordic UART Service
+  <-> USB-C serial / Wi-Fi TCP KISS
   <-> iPhone or mobile packet app
 ```
 

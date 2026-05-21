@@ -49,6 +49,11 @@ TFT_eSPI tft;
 constexpr uint8_t BUTTON_NEXT_PIN = 0;
 constexpr uint8_t BUTTON_SELECT_PIN = 35;
 constexpr uint8_t KISS_FEND = 0xC0;
+constexpr uint8_t KISS_FESC = 0xDB;
+constexpr uint8_t KISS_TFEND = 0xDC;
+constexpr uint8_t KISS_TFESC = 0xDD;
+constexpr size_t KISS_MAX_FRAME_BYTES = 330;
+constexpr size_t RADIO_RX_BUFFER_BYTES = 512;
 constexpr uint32_t BUTTON_DEBOUNCE_MS = 45;
 constexpr uint32_t DISPLAY_REFRESH_MS = 250;
 constexpr uint32_t RADIO_CONNECT_INTERVAL_MS = 15000;
@@ -59,6 +64,7 @@ constexpr char ACTIVE_MODE_KEY[] = "mode";
 constexpr char RADIO_MAC_KEY[] = "radio_mac";
 constexpr char RADIO_NAME_KEY[] = "radio_name";
 constexpr char RADIO_ALT_NAME_KEY[] = "radio_alt";
+constexpr char TCP_MODE_KEY[] = "tcp_mode";
 
 uint32_t radioToClientCount = 0;
 uint32_t clientToRadioCount = 0;
@@ -83,6 +89,11 @@ enum class RadioState : uint8_t {
   Error,
 };
 
+enum class TcpIngressMode : uint8_t {
+  Kiss = 0,
+  Raw = 1,
+};
+
 enum class TowerIconMode : uint8_t {
   Question,
   Lightning,
@@ -99,6 +110,7 @@ enum class RadioTestState : uint8_t {
 
 ClientMode selectedMode = ClientMode::Usb;
 ClientMode activeMode = ClientMode::Usb;
+TcpIngressMode tcpIngressMode = TcpIngressMode::Kiss;
 RadioState radioState = RadioState::Disabled;
 RadioTestState radioTestState = RadioTestState::Idle;
 String radioPeerName = "";
@@ -113,6 +125,24 @@ uint32_t radioPairingEvents = 0;
 uint32_t radioTestStartedMs = 0;
 uint32_t radioTestTxCount = 0;
 uint32_t radioTestRxCount = 0;
+uint32_t radioRxByteCount = 0;
+uint32_t radioRxBufferWrites = 0;
+uint32_t radioRawCommandCount = 0;
+uint32_t kissMalformedCount = 0;
+uint8_t radioRxBuffer[RADIO_RX_BUFFER_BYTES];
+size_t radioRxBufferStart = 0;
+size_t radioRxBufferLength = 0;
+
+struct KissIngress {
+  uint8_t buffer[KISS_MAX_FRAME_BYTES];
+  size_t length = 0;
+  bool inFrame = false;
+  bool escaped = false;
+  bool malformed = false;
+};
+
+KissIngress usbKissIngress;
+KissIngress wifiKissIngress;
 
 void renderDisplay();
 
@@ -126,12 +156,126 @@ void logLine(const char *line) {
   }
 }
 
+void rememberRadioRxBytes(const uint8_t *data, size_t length) {
+  for (size_t i = 0; i < length; i++) {
+    size_t writeIndex = (radioRxBufferStart + radioRxBufferLength) % RADIO_RX_BUFFER_BYTES;
+    radioRxBuffer[writeIndex] = data[i];
+    if (radioRxBufferLength < RADIO_RX_BUFFER_BYTES) {
+      radioRxBufferLength++;
+    } else {
+      radioRxBufferStart = (radioRxBufferStart + 1) % RADIO_RX_BUFFER_BYTES;
+    }
+    radioRxBufferWrites++;
+  }
+}
+
+uint8_t radioRxBufferAt(size_t offset) {
+  return radioRxBuffer[(radioRxBufferStart + offset) % RADIO_RX_BUFFER_BYTES];
+}
+
+void writeKissByteEscaped(Stream &stream, uint8_t value) {
+  if (value == KISS_FEND) {
+    stream.write(KISS_FESC);
+    stream.write(KISS_TFEND);
+    return;
+  }
+  if (value == KISS_FESC) {
+    stream.write(KISS_FESC);
+    stream.write(KISS_TFESC);
+    return;
+  }
+  stream.write(value);
+}
+
+void writeKissFrameToRadio(const uint8_t *payload, size_t length) {
+  if (length == 0 || radioState != RadioState::Connected || !radioSerial.connected()) {
+    return;
+  }
+
+  radioSerial.write(KISS_FEND);
+  for (size_t i = 0; i < length; i++) {
+    writeKissByteEscaped(radioSerial, payload[i]);
+  }
+  radioSerial.write(KISS_FEND);
+  clientToRadioCount++;
+  displayDirty = true;
+}
+
+void resetKissIngress(KissIngress &ingress) {
+  ingress.length = 0;
+  ingress.escaped = false;
+  ingress.malformed = false;
+}
+
+bool appendKissByte(KissIngress &ingress, uint8_t value) {
+  if (ingress.length >= KISS_MAX_FRAME_BYTES) {
+    ingress.malformed = true;
+    return false;
+  }
+  ingress.buffer[ingress.length++] = value;
+  return true;
+}
+
+bool processKissIngressByte(KissIngress &ingress, uint8_t value) {
+  if (value == KISS_FEND) {
+    if (ingress.inFrame && ingress.length > 0 && !ingress.malformed) {
+      writeKissFrameToRadio(ingress.buffer, ingress.length);
+    } else if (ingress.malformed) {
+      kissMalformedCount++;
+      displayDirty = true;
+    }
+    ingress.inFrame = true;
+    resetKissIngress(ingress);
+    return true;
+  }
+
+  if (!ingress.inFrame) {
+    return false;
+  }
+
+  if (ingress.malformed) {
+    return true;
+  }
+
+  if (ingress.escaped) {
+    ingress.escaped = false;
+    if (value == KISS_TFEND) {
+      appendKissByte(ingress, KISS_FEND);
+      return true;
+    }
+    if (value == KISS_TFESC) {
+      appendKissByte(ingress, KISS_FESC);
+      return true;
+    }
+    ingress.malformed = true;
+    return true;
+  }
+
+  if (value == KISS_FESC) {
+    ingress.escaped = true;
+    return true;
+  }
+
+  appendKissByte(ingress, value);
+  return true;
+}
+
 const char *modeName(ClientMode mode) {
   switch (mode) {
     case ClientMode::Usb:
       return "USB-C";
     case ClientMode::Wifi:
       return "Wi-Fi";
+  }
+  return "?";
+}
+
+const char *tcpIngressModeName(TcpIngressMode mode) {
+  switch (mode) {
+    case TcpIngressMode::Kiss:
+      return "KISS";
+    case TcpIngressMode::Raw:
+      return "RAW";
   }
   return "?";
 }
@@ -185,6 +329,16 @@ ClientMode modeFromValue(uint8_t value) {
     case static_cast<uint8_t>(ClientMode::Usb):
     default:
       return ClientMode::Usb;
+  }
+}
+
+TcpIngressMode tcpIngressModeFromValue(uint8_t value) {
+  switch (value) {
+    case static_cast<uint8_t>(TcpIngressMode::Raw):
+      return TcpIngressMode::Raw;
+    case static_cast<uint8_t>(TcpIngressMode::Kiss):
+    default:
+      return TcpIngressMode::Kiss;
   }
 }
 
@@ -244,6 +398,7 @@ void loadSettings() {
   radioTargetName = preferences.getString(RADIO_NAME_KEY, SIDEBAND_RADIO_NAME_HINT);
   radioTargetAltName = preferences.getString(RADIO_ALT_NAME_KEY, SIDEBAND_RADIO_ALT_NAME_HINT);
   radioTargetMac = preferences.getString(RADIO_MAC_KEY, SIDEBAND_RADIO_MAC);
+  tcpIngressMode = tcpIngressModeFromValue(preferences.getUChar(TCP_MODE_KEY, static_cast<uint8_t>(TcpIngressMode::Kiss)));
 }
 
 void saveActiveMode(ClientMode mode) {
@@ -415,6 +570,9 @@ void relayRadioToClient() {
   if (len == 0) {
     return;
   }
+  radioRxByteCount += len;
+  rememberRadioRxBytes(buffer, len);
+  displayDirty = true;
 
   if (radioTestState == RadioTestState::Wait) {
     radioTestRxCount++;
@@ -465,14 +623,19 @@ void relayWifiToRadio() {
     return;
   }
 
-  uint8_t buffer[128];
-  size_t len = 0;
-  while (wifiClient.available() && len < sizeof(buffer)) {
-    buffer[len++] = static_cast<uint8_t>(wifiClient.read());
+  bool rawBytesForwarded = false;
+  while (wifiClient.available() > 0) {
+    uint8_t value = static_cast<uint8_t>(wifiClient.read());
+    if (tcpIngressMode == TcpIngressMode::Raw) {
+      if (radioState == RadioState::Connected && radioSerial.connected()) {
+        radioSerial.write(value);
+        rawBytesForwarded = true;
+      }
+      continue;
+    }
+    processKissIngressByte(wifiKissIngress, value);
   }
-
-  if (len > 0 && radioState == RadioState::Connected && radioSerial.connected()) {
-    radioSerial.write(buffer, len);
+  if (rawBytesForwarded) {
     clientToRadioCount++;
     displayDirty = true;
   }
@@ -480,7 +643,7 @@ void relayWifiToRadio() {
 
 bool isCommandPrefix(const String &input) {
   return input == "help" || input == "?" || input == "status" ||
-         input.startsWith("radio ") || input.startsWith("mode ");
+         input.startsWith("radio ") || input.startsWith("mode ") || input.startsWith("tcp ");
 }
 
 void printSerialHelp() {
@@ -491,8 +654,13 @@ void printSerialHelp() {
   Serial.println("  status");
   Serial.println("  mode usb");
   Serial.println("  mode wifi");
+  Serial.println("  tcp kiss");
+  Serial.println("  tcp raw");
   Serial.println("  radio show");
   Serial.println("  radio test");
+  Serial.println("  radio dump");
+  Serial.println("  radio replay");
+  Serial.println("  radio raw <command>");
   Serial.println("  radio mac <AA:BB:CC:DD:EE:FF>");
   Serial.println("  radio name <name>");
   Serial.println("  radio alt <name>");
@@ -507,6 +675,7 @@ void printRadioConfig() {
                 radioTargetName.c_str(),
                 radioTargetAltName.c_str(),
                 radioTargetMac.length() > 0 ? "configured" : "unset");
+  Serial.printf("SIDEBAND tcp ingress=%s\n", tcpIngressModeName(tcpIngressMode));
 }
 
 void saveRadioTargetMac(const String &mac) {
@@ -542,6 +711,59 @@ void clearRadioConfig() {
   displayDirty = true;
 }
 
+void sendRadioRawCommand(const String &rawCommand) {
+  if (radioState != RadioState::Connected || !radioSerial.connected()) {
+    logLine("SIDEBAND radio raw failed: no link");
+    return;
+  }
+
+  String command(rawCommand);
+  command.trim();
+  if (command.length() == 0) {
+    logLine("SIDEBAND radio raw failed: empty command");
+    return;
+  }
+
+  radioSerial.print(command);
+  radioSerial.print("\r");
+  radioRawCommandCount++;
+  displayDirty = true;
+  logLine("SIDEBAND radio raw command sent");
+}
+
+void dumpRadioRxBuffer() {
+  if (!serialDiagnosticsEnabled()) {
+    return;
+  }
+
+  Serial.printf("SIDEBAND radio rx buffer bytes=%u writes=%lu\n",
+                static_cast<unsigned>(radioRxBufferLength),
+                static_cast<unsigned long>(radioRxBufferWrites));
+  for (size_t i = 0; i < radioRxBufferLength; i++) {
+    if (i % 16 == 0) {
+      Serial.printf("%04x:", static_cast<unsigned>(i));
+    }
+    Serial.printf(" %02x", radioRxBufferAt(i));
+    if (i % 16 == 15 || i + 1 == radioRxBufferLength) {
+      Serial.println();
+    }
+  }
+}
+
+void replayRadioRxBufferToWifi() {
+  if (activeMode != ClientMode::Wifi || !(wifiClient && wifiClient.connected())) {
+    logLine("SIDEBAND radio replay failed: no Wi-Fi client");
+    return;
+  }
+
+  for (size_t i = 0; i < radioRxBufferLength; i++) {
+    wifiClient.write(radioRxBufferAt(i));
+  }
+  radioToClientCount++;
+  displayDirty = true;
+  logLine("SIDEBAND radio rx buffer replayed");
+}
+
 void saveModeAndRestart(ClientMode mode) {
   activeMode = mode;
   selectedMode = mode;
@@ -552,6 +774,15 @@ void saveModeAndRestart(ClientMode mode) {
   }
   delay(250);
   ESP.restart();
+}
+
+void saveTcpIngressMode(TcpIngressMode mode) {
+  tcpIngressMode = mode;
+  preferences.putUChar(TCP_MODE_KEY, static_cast<uint8_t>(mode));
+  displayDirty = true;
+  if (serialDiagnosticsEnabled()) {
+    Serial.printf("SIDEBAND tcp ingress saved=%s\n", tcpIngressModeName(tcpIngressMode));
+  }
 }
 
 void handleSerialCommand(const String &command) {
@@ -579,6 +810,16 @@ void handleSerialCommand(const String &command) {
     return;
   }
 
+  if (command == "tcp kiss") {
+    saveTcpIngressMode(TcpIngressMode::Kiss);
+    return;
+  }
+
+  if (command == "tcp raw") {
+    saveTcpIngressMode(TcpIngressMode::Raw);
+    return;
+  }
+
   if (command == "radio show") {
     printRadioConfig();
     return;
@@ -586,6 +827,21 @@ void handleSerialCommand(const String &command) {
 
   if (command == "radio test") {
     startRadioLinkTest();
+    return;
+  }
+
+  if (command == "radio dump") {
+    dumpRadioRxBuffer();
+    return;
+  }
+
+  if (command == "radio replay") {
+    replayRadioRxBufferToWifi();
+    return;
+  }
+
+  if (command.startsWith("radio raw ")) {
+    sendRadioRawCommand(command.substring(strlen("radio raw ")));
     return;
   }
 
@@ -624,26 +880,12 @@ void handleSerialCommand(const String &command) {
 }
 
 void relayUsbToRadio() {
-  static bool kissFrameActive = false;
   static String commandInput = "";
 
   while (Serial.available() > 0) {
     uint8_t ch = static_cast<uint8_t>(Serial.read());
 
-    if (ch == KISS_FEND) {
-      kissFrameActive = !kissFrameActive;
-      if (radioState == RadioState::Connected && radioSerial.connected()) {
-        radioSerial.write(ch);
-        clientToRadioCount++;
-        displayDirty = true;
-      }
-      continue;
-    }
-
-    if (kissFrameActive) {
-      if (radioState == RadioState::Connected && radioSerial.connected()) {
-        radioSerial.write(ch);
-      }
+    if (processKissIngressByte(usbKissIngress, ch)) {
       continue;
     }
 
@@ -949,21 +1191,27 @@ void printStatus() {
   lastStatusMs = now;
 
   Serial.printf(
-      "SIDEBAND status=running mode=%s selected=%s wifi=%s radio=%s radio_peer=\"%s\" pair=\"%s\" test=%s test_tx=%lu test_rx=%lu pair_events=%lu attempts=%lu reconnects=%lu radio_to_client=%lu client_to_radio=%lu\n",
+      "SIDEBAND status=running mode=%s selected=%s tcp=%s wifi=%s wifi_client=%s radio=%s radio_peer=\"%s\" pair=\"%s\" test=%s test_tx=%lu test_rx=%lu raw_cmds=%lu pair_events=%lu attempts=%lu reconnects=%lu radio_rx_bytes=%lu radio_rx_buf=%u radio_to_client=%lu client_to_radio=%lu kiss_malformed=%lu\n",
       modeName(activeMode),
       modeName(selectedMode),
+      tcpIngressModeName(tcpIngressMode),
       activeMode == ClientMode::Wifi ? WiFi.softAPIP().toString().c_str() : "off",
+      activeMode == ClientMode::Wifi && wifiClient && wifiClient.connected() ? "yes" : "no",
       radioStateName(radioState),
       radioPeerName.c_str(),
       radioPairingCode[0] != '\0' ? radioPairingCode : "-",
       radioTestStateName(radioTestState),
       static_cast<unsigned long>(radioTestTxCount),
       static_cast<unsigned long>(radioTestRxCount),
+      static_cast<unsigned long>(radioRawCommandCount),
       static_cast<unsigned long>(radioPairingEvents),
       static_cast<unsigned long>(radioConnectAttempts),
       static_cast<unsigned long>(radioReconnects),
+      static_cast<unsigned long>(radioRxByteCount),
+      static_cast<unsigned>(radioRxBufferLength),
       static_cast<unsigned long>(radioToClientCount),
-      static_cast<unsigned long>(clientToRadioCount));
+      static_cast<unsigned long>(clientToRadioCount),
+      static_cast<unsigned long>(kissMalformedCount));
 }
 
 }  // namespace

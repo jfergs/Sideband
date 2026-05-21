@@ -3,14 +3,17 @@
 Firmware for the Sideband bridge lives here.
 
 The primary target is a Bluetooth Classic capable ESP32 board that can connect
-to a Kenwood TH-D75 class radio over SPP while exposing a BLE UART service for
-mobile clients.
+to a Kenwood TH-D75 class radio over SPP while exposing USB-C serial or Wi-Fi
+TCP KISS transports for mobile clients.
 
 ## Current Scaffold
 
 - `sideband-bridge/`: initial PlatformIO Arduino scaffold.
 - Supported first-pass chip family: original ESP32 with Bluetooth Classic.
 - Not primary bridge targets: ESP32-S3, ESP32-C3, ESP32-C6.
+- Wi-Fi TCP input defaults to KISS framing. For bench testing raw APRS output
+  or TNC command streams, use the serial monitor commands `tcp raw` and
+  `tcp kiss` to switch the persisted TCP ingress mode.
 
 ## Safety Notes
 

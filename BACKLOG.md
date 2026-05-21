@@ -127,6 +127,15 @@ radio design work here; roll up only cross-project dependencies to
 - `SB-030` Implement Bluetooth Classic radio transport.
   - Discover, pair with, and connect to a TH-D75 class radio over SPP.
   - Maintain stable connection, detect disconnects, and auto-reconnect.
+  - Current diagnostics:
+    - Serial monitor status reports raw radio RX bytes separately from forwarded
+      client writes.
+    - `radio raw <command>` can send CR-terminated TNC commands directly over
+      the radio Bluetooth SPP link for bench testing without a packet app.
+    - A rolling radio RX buffer keeps the most recent radio bytes for
+      `radio dump` inspection or `radio replay` to a connected Wi-Fi client.
+    - Wi-Fi TCP ingress can be switched between default KISS framing and raw
+      pass-through with `tcp kiss` / `tcp raw`.
 
 - `SB-031` Implement persistent pairing storage.
   - Store paired MAC address and restore previous connections from
@@ -153,6 +162,16 @@ radio design work here; roll up only cross-project dependencies to
 - `SB-050` Implement KISS protocol middleware.
   - Add KISS parser and serializer support for FEND, FESC, TFEND, TFESC, packet
     escaping, and malformed-frame handling.
+  - Current foundation:
+    - USB-C serial and Wi-Fi TCP client ingress use a shared KISS frame parser.
+    - Client frames are decoded, re-escaped, and serialized onto the radio link.
+    - Malformed or oversized client frames are dropped and counted without
+      logging payload bytes.
+  - Remaining acceptance criteria:
+    - Validate escaped frame pass-through against the TH-D75 and mobile packet
+      apps.
+    - Add host-side parser tests or a firmware-adjacent harness for malformed
+      frame cases.
 
 - `SB-051` Create transparent packet relay.
   - Relay radio to USB-C/Wi-Fi clients and clients to radio while preserving
