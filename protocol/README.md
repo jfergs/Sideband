@@ -14,6 +14,12 @@ TH-D75 class radio
   <-> iPhone or mobile packet app
 ```
 
+Wi-Fi discovery:
+
+- Manual TCP KISS endpoint: `192.168.4.1:8001`.
+- mDNS service: `_kiss-tnc._tcp`.
+- Default host name: `sideband.local`.
+
 ## KISS Framing Scope
 
 - Preserve binary payloads.

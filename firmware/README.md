@@ -17,6 +17,9 @@ TCP KISS transports for mobile clients.
 - KISS diagnostics are available from the serial monitor with `kiss stats` and
   `kiss reset`. `scripts/kiss-exerciser.py` can send known TCP KISS and raw
   payloads to the bridge during bench tests.
+- Wi-Fi mode advertises the TCP KISS service over mDNS as `_kiss-tnc._tcp` on
+  port `8001` with default host name `sideband.local`. The display shows the AP
+  SSID and Wi-Fi password for field setup.
 
 ## Safety Notes
 

@@ -140,6 +140,8 @@ radio design work here; roll up only cross-project dependencies to
       last parser error.
     - `scripts/kiss-exerciser.py` sends known KISS, malformed KISS, and raw TCP
       payloads to the bridge for bench validation.
+    - Wi-Fi mode advertises `_kiss-tnc._tcp` over mDNS and shows the AP SSID
+      and password on the TTGO display.
 
 - `SB-031` Implement persistent pairing storage.
   - Store paired MAC address and restore previous connections from

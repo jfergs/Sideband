@@ -1,5 +1,6 @@
 #include <Arduino.h>
 #include <BluetoothSerial.h>
+#include <ESPmDNS.h>
 #include <Preferences.h>
 #include <WiFi.h>
 #ifdef SIDEBAND_HAS_TFT
@@ -30,6 +31,10 @@
 
 #ifndef SIDEBAND_WIFI_TCP_PORT
 #define SIDEBAND_WIFI_TCP_PORT 8001
+#endif
+
+#ifndef SIDEBAND_MDNS_HOSTNAME
+#define SIDEBAND_MDNS_HOSTNAME "sideband"
 #endif
 
 #ifndef SIDEBAND_TFT_ANIMATIONS
@@ -71,6 +76,7 @@ uint32_t clientToRadioCount = 0;
 bool displayDirty = true;
 bool radioSerialStarted = false;
 bool wifiStarted = false;
+bool mdnsStarted = false;
 String wifiApSsid = "";
 
 enum class ClientMode : uint8_t {
@@ -587,6 +593,15 @@ void setupWifiTransport() {
   WiFi.softAP(wifiApSsid.c_str(), SIDEBAND_WIFI_AP_PASSWORD);
   wifiServer.begin();
   wifiServer.setNoDelay(true);
+  if (MDNS.begin(SIDEBAND_MDNS_HOSTNAME)) {
+    MDNS.addService("kiss-tnc", "tcp", SIDEBAND_WIFI_TCP_PORT);
+    MDNS.addServiceTxt("kiss-tnc", "tcp", "model", "sideband-bridge");
+    MDNS.addServiceTxt("kiss-tnc", "tcp", "transport", "wifi");
+    MDNS.addServiceTxt("kiss-tnc", "tcp", "radio", radioTargetName.c_str());
+    mdnsStarted = true;
+  } else {
+    mdnsStarted = false;
+  }
   wifiStarted = true;
   displayDirty = true;
 }
@@ -1180,6 +1195,7 @@ void renderDisplay() {
   static char previousCounters[32] = "";
   static char previousClientDevice[32] = "";
   static char previousRadioDevice[32] = "";
+  static char previousWifiSecret[32] = "";
   uint32_t now = millis();
   if (!displayDirty && now - lastDrawMs < DISPLAY_REFRESH_MS) {
     return;
@@ -1246,9 +1262,22 @@ void renderDisplay() {
   copyPreviousValue(previousCounters, sizeof(previousCounters), counts);
 
   char clientDevice[32];
-  snprintf(clientDevice, sizeof(clientDevice), "%s %s",
-           activeMode == ClientMode::Wifi ? "WIFI" : "USB",
-           activeMode == ClientMode::Wifi && wifiClient && wifiClient.connected() ? "IPHONE" : "-");
+  if (activeMode == ClientMode::Wifi) {
+    snprintf(clientDevice, sizeof(clientDevice), "%s %s",
+             (wifiClient && wifiClient.connected()) ? "TCP" : "AP",
+             mdnsStarted ? "MDNS" : "OPEN");
+    drawValueField(6, 214, 84, clientDevice, previousClientDevice, mdnsStarted ? TFT_GREEN : TFT_ORANGE);
+    copyPreviousValue(previousClientDevice, sizeof(previousClientDevice), clientDevice);
+
+    char wifiSecret[32];
+    snprintf(wifiSecret, sizeof(wifiSecret), "PW %.20s", SIDEBAND_WIFI_AP_PASSWORD);
+    drawValueField(96, 214, 138, wifiSecret, previousWifiSecret, TFT_GREEN);
+    copyPreviousValue(previousWifiSecret, sizeof(previousWifiSecret), wifiSecret);
+    copyPreviousValue(previousRadioDevice, sizeof(previousRadioDevice), "");
+    return;
+  }
+
+  snprintf(clientDevice, sizeof(clientDevice), "USB -");
   drawValueField(6, 214, 84, clientDevice, previousClientDevice, TFT_GREEN);
   copyPreviousValue(previousClientDevice, sizeof(previousClientDevice), clientDevice);
 
@@ -1258,6 +1287,7 @@ void renderDisplay() {
   drawValueField(96, 214, 114, radioDevice, previousRadioDevice,
                  radioState == RadioState::Connected ? TFT_GREEN : TFT_DARKGREY);
   copyPreviousValue(previousRadioDevice, sizeof(previousRadioDevice), radioDevice);
+  copyPreviousValue(previousWifiSecret, sizeof(previousWifiSecret), "");
 }
 
 void setupDisplay() {
@@ -1292,11 +1322,12 @@ void printStatus() {
   lastStatusMs = now;
 
   Serial.printf(
-      "SIDEBAND status=running mode=%s selected=%s tcp=%s wifi=%s wifi_client=%s radio=%s radio_peer=\"%s\" pair=\"%s\" test=%s test_tx=%lu test_rx=%lu raw_cmds=%lu pair_events=%lu attempts=%lu reconnects=%lu radio_rx_bytes=%lu radio_rx_buf=%u radio_to_client=%lu client_to_radio=%lu kiss_tx=%lu kiss_rx=%lu kiss_malformed=%lu kiss_last=%s\n",
+      "SIDEBAND status=running mode=%s selected=%s tcp=%s wifi=%s mdns=%s wifi_client=%s radio=%s radio_peer=\"%s\" pair=\"%s\" test=%s test_tx=%lu test_rx=%lu raw_cmds=%lu pair_events=%lu attempts=%lu reconnects=%lu radio_rx_bytes=%lu radio_rx_buf=%u radio_to_client=%lu client_to_radio=%lu kiss_tx=%lu kiss_rx=%lu kiss_malformed=%lu kiss_last=%s\n",
       modeName(activeMode),
       modeName(selectedMode),
       tcpIngressModeName(tcpIngressMode),
       activeMode == ClientMode::Wifi ? WiFi.softAPIP().toString().c_str() : "off",
+      mdnsStarted ? "on" : "off",
       activeMode == ClientMode::Wifi && wifiClient && wifiClient.connected() ? "yes" : "no",
       radioStateName(radioState),
       radioPeerName.c_str(),
