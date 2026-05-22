@@ -2,6 +2,7 @@
 #include <BluetoothSerial.h>
 #include <ESPmDNS.h>
 #include <Preferences.h>
+#include <WebServer.h>
 #include <WiFi.h>
 #ifdef SIDEBAND_HAS_TFT
 #include <TFT_eSPI.h>
@@ -47,6 +48,7 @@ BluetoothSerial radioSerial;
 Preferences preferences;
 WiFiServer wifiServer(SIDEBAND_WIFI_TCP_PORT);
 WiFiClient wifiClient;
+WebServer webServer(80);
 #ifdef SIDEBAND_HAS_TFT
 TFT_eSPI tft;
 #endif
@@ -79,6 +81,7 @@ bool displayDirty = true;
 bool radioSerialStarted = false;
 bool wifiStarted = false;
 bool mdnsStarted = false;
+bool webStarted = false;
 String wifiApSsid = "";
 
 enum class ClientMode : uint8_t {
@@ -156,6 +159,15 @@ KissIngress wifiKissIngress;
 KissIngress radioKissMonitor;
 
 void renderDisplay();
+void saveModeAndRestart(ClientMode mode);
+void saveRadioTargetMac(const String &mac);
+void saveRadioTargetName(const String &name);
+void saveRadioTargetAltName(const String &name);
+void clearRadioConfig();
+void saveTcpIngressMode(TcpIngressMode mode);
+void resetKissStats();
+void resetCatStats();
+void startRadioLinkTest();
 
 bool serialDiagnosticsEnabled() {
   return activeMode != ClientMode::Usb;
@@ -506,6 +518,203 @@ void saveActiveMode(ClientMode mode) {
   preferences.putUChar(ACTIVE_MODE_KEY, static_cast<uint8_t>(mode));
 }
 
+String htmlEscape(const String &value) {
+  String escaped;
+  escaped.reserve(value.length() + 8);
+  for (size_t i = 0; i < value.length(); i++) {
+    char ch = value.charAt(i);
+    if (ch == '&') {
+      escaped += F("&amp;");
+    } else if (ch == '<') {
+      escaped += F("&lt;");
+    } else if (ch == '>') {
+      escaped += F("&gt;");
+    } else if (ch == '"') {
+      escaped += F("&quot;");
+    } else {
+      escaped += ch;
+    }
+  }
+  return escaped;
+}
+
+void appendHtmlHeader(String &html, const char *title) {
+  html += F("<!doctype html><html><head><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">");
+  html += F("<meta http-equiv=\"refresh\" content=\"8\">");
+  html += F("<title>");
+  html += title;
+  html += F("</title><style>");
+  html += F("body{font-family:-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;background:#0b0d0e;color:#f4f4f4;margin:0;padding:18px;}");
+  html += F("h1{font-size:22px;margin:0 0 14px;}h2{font-size:15px;margin:18px 0 8px;color:#9ad;}");
+  html += F(".row{display:flex;justify-content:space-between;gap:16px;border-bottom:1px solid #222;padding:7px 0;}");
+  html += F(".key{color:#99a}.val{text-align:right}.panel{max-width:560px;margin:auto}.card{border:1px solid #222;border-radius:8px;padding:12px;margin:12px 0;background:#111416;}");
+  html += F("input,select,button{font:inherit;border-radius:6px;border:1px solid #333;background:#050607;color:#fff;padding:8px;margin:4px 0;width:100%;box-sizing:border-box;}");
+  html += F("button{background:#16446b;border-color:#236399}.danger{background:#582024;border-color:#87323a}.grid{display:grid;grid-template-columns:1fr 1fr;gap:8px;}");
+  html += F("</style></head><body><main class=\"panel\">");
+  html += F("<h1>");
+  html += title;
+  html += F("</h1>");
+}
+
+void appendHtmlFooter(String &html) {
+  html += F("</main></body></html>");
+}
+
+void appendStatusRow(String &html, const char *key, const String &value) {
+  html += F("<div class=\"row\"><span class=\"key\">");
+  html += key;
+  html += F("</span><span class=\"val\">");
+  html += htmlEscape(value);
+  html += F("</span></div>");
+}
+
+void sendWebRedirect(const char *path) {
+  webServer.sendHeader("Location", path);
+  webServer.send(303, "text/plain", "See Other");
+}
+
+void handleWebRoot() {
+  String html;
+  html.reserve(5200);
+  appendHtmlHeader(html, "Sideband");
+
+  html += F("<section class=\"card\"><h2>Status</h2>");
+  appendStatusRow(html, "Mode", modeName(activeMode));
+  appendStatusRow(html, "Selected", modeName(selectedMode));
+  appendStatusRow(html, "TCP", tcpIngressModeName(tcpIngressMode));
+  appendStatusRow(html, "IP", activeMode == ClientMode::Wifi ? WiFi.softAPIP().toString() : String("off"));
+  appendStatusRow(html, "WiFi clients", String(WiFi.softAPgetStationNum()));
+  appendStatusRow(html, "TCP client", (wifiClient && wifiClient.connected()) ? String("connected") : String("open"));
+  appendStatusRow(html, "mDNS", mdnsStarted ? String("on") : String("off"));
+  appendStatusRow(html, "Radio", radioStateName(radioState));
+  appendStatusRow(html, "Peer", radioPeerName.length() > 0 ? radioPeerName : radioTargetName);
+  appendStatusRow(html, "KISS TX/RX", String(kissClientFrameCount) + "/" + String(kissRadioFrameCount));
+  appendStatusRow(html, "CAT commands", String(catHardwareCommandCount));
+  appendStatusRow(html, "CAT last", catLastHardwareCommand);
+  html += F("</section>");
+
+  html += F("<section class=\"card\"><h2>Mode</h2><form method=\"post\" action=\"/mode\"><select name=\"mode\">");
+  html += F("<option value=\"wifi\"");
+  html += activeMode == ClientMode::Wifi ? F(" selected") : F("");
+  html += F(">WiFi</option><option value=\"usb\"");
+  html += activeMode == ClientMode::Usb ? F(" selected") : F("");
+  html += F(">USB-C</option></select><button type=\"submit\">Save mode and restart</button></form></section>");
+
+  html += F("<section class=\"card\"><h2>Radio Target</h2><form method=\"post\" action=\"/radio\">");
+  html += F("<label>Name<input name=\"name\" value=\"");
+  html += htmlEscape(radioTargetName);
+  html += F("\"></label><label>Alt name<input name=\"alt\" value=\"");
+  html += htmlEscape(radioTargetAltName);
+  html += F("\"></label><label>MAC<input name=\"mac\" placeholder=\"AA:BB:CC:DD:EE:FF\" value=\"");
+  html += htmlEscape(radioTargetMac);
+  html += F("\"></label><button type=\"submit\">Save radio target</button></form>");
+  html += F("<form method=\"post\" action=\"/radio/clear\"><button class=\"danger\" type=\"submit\">Clear radio target</button></form></section>");
+
+  html += F("<section class=\"card\"><h2>TCP Ingress</h2><form method=\"post\" action=\"/tcp\"><select name=\"mode\">");
+  html += F("<option value=\"kiss\"");
+  html += tcpIngressMode == TcpIngressMode::Kiss ? F(" selected") : F("");
+  html += F(">KISS</option><option value=\"raw\"");
+  html += tcpIngressMode == TcpIngressMode::Raw ? F(" selected") : F("");
+  html += F(">RAW</option></select><button type=\"submit\">Save TCP mode</button></form></section>");
+
+  html += F("<section class=\"card\"><h2>Diagnostics</h2><div class=\"grid\">");
+  html += F("<form method=\"post\" action=\"/kiss/reset\"><button type=\"submit\">Reset KISS</button></form>");
+  html += F("<form method=\"post\" action=\"/cat/reset\"><button type=\"submit\">Reset CAT</button></form>");
+  html += F("<form method=\"post\" action=\"/radio/test\"><button type=\"submit\">Radio test</button></form>");
+  html += F("<form method=\"post\" action=\"/restart\"><button class=\"danger\" type=\"submit\">Restart</button></form>");
+  html += F("</div></section>");
+
+  appendHtmlFooter(html);
+  webServer.send(200, "text/html", html);
+}
+
+void handleWebMode() {
+  String mode = webServer.arg("mode");
+  mode.toLowerCase();
+  if (mode == "wifi") {
+    saveModeAndRestart(ClientMode::Wifi);
+    return;
+  }
+  if (mode == "usb") {
+    saveModeAndRestart(ClientMode::Usb);
+    return;
+  }
+  sendWebRedirect("/");
+}
+
+void handleWebRadio() {
+  if (webServer.hasArg("name")) {
+    saveRadioTargetName(webServer.arg("name"));
+  }
+  if (webServer.hasArg("alt")) {
+    saveRadioTargetAltName(webServer.arg("alt"));
+  }
+  if (webServer.hasArg("mac")) {
+    String mac = webServer.arg("mac");
+    mac.trim();
+    saveRadioTargetMac(mac);
+  }
+  sendWebRedirect("/");
+}
+
+void handleWebTcp() {
+  String mode = webServer.arg("mode");
+  mode.toLowerCase();
+  if (mode == "raw") {
+    saveTcpIngressMode(TcpIngressMode::Raw);
+  } else {
+    saveTcpIngressMode(TcpIngressMode::Kiss);
+  }
+  sendWebRedirect("/");
+}
+
+void setupWebConfig() {
+  if (webStarted || activeMode != ClientMode::Wifi) {
+    return;
+  }
+
+  webServer.on("/", HTTP_GET, handleWebRoot);
+  webServer.on("/favicon.ico", HTTP_GET, []() {
+    webServer.send(204, "image/x-icon", "");
+  });
+  webServer.on("/mode", HTTP_POST, handleWebMode);
+  webServer.on("/radio", HTTP_POST, handleWebRadio);
+  webServer.on("/radio/clear", HTTP_POST, []() {
+    clearRadioConfig();
+    sendWebRedirect("/");
+  });
+  webServer.on("/tcp", HTTP_POST, handleWebTcp);
+  webServer.on("/kiss/reset", HTTP_POST, []() {
+    resetKissStats();
+    sendWebRedirect("/");
+  });
+  webServer.on("/cat/reset", HTTP_POST, []() {
+    resetCatStats();
+    sendWebRedirect("/");
+  });
+  webServer.on("/radio/test", HTTP_POST, []() {
+    startRadioLinkTest();
+    sendWebRedirect("/");
+  });
+  webServer.on("/restart", HTTP_POST, []() {
+    webServer.send(200, "text/plain", "Restarting");
+    delay(250);
+    ESP.restart();
+  });
+  webServer.onNotFound([]() {
+    webServer.send(404, "text/plain", "Not found");
+  });
+  webServer.begin();
+  webStarted = true;
+}
+
+void maintainWebConfig() {
+  if (activeMode != ClientMode::Wifi || !webStarted) {
+    return;
+  }
+  webServer.handleClient();
+}
+
 void setupRadioTransport() {
   if (radioSerialStarted) {
     return;
@@ -636,10 +845,12 @@ void setupWifiTransport() {
     MDNS.addServiceTxt("kiss-tnc", "tcp", "model", "sideband-bridge");
     MDNS.addServiceTxt("kiss-tnc", "tcp", "transport", "wifi");
     MDNS.addServiceTxt("kiss-tnc", "tcp", "radio", radioTargetName.c_str());
+    MDNS.addService("http", "tcp", 80);
     mdnsStarted = true;
   } else {
     mdnsStarted = false;
   }
+  setupWebConfig();
   wifiStarted = true;
   displayDirty = true;
 }
@@ -1358,6 +1569,7 @@ void loop() {
   maintainRadioConnection();
   maintainRadioLinkTest();
   maintainWifiClient();
+  maintainWebConfig();
   relayUsbToRadio();
   relayWifiToRadio();
   relayRadioToClient();

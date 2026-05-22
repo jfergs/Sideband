@@ -257,6 +257,17 @@ radio design work here; roll up only cross-project dependencies to
 - `SB-071` Add onboard web configuration.
   - Provide mobile-friendly controls for Bluetooth pairing, Wi-Fi settings,
     packet monitoring, and firmware update support.
+  - Current foundation:
+    - Wi-Fi mode starts a lightweight HTTP server on port 80 alongside the KISS
+      TCP service on port 8001.
+    - The web UI exposes status, radio target fields, active mode switching,
+      TCP ingress mode, KISS/CAT diagnostic resets, radio link test, and restart
+      controls.
+    - mDNS advertises the HTTP service in addition to `_kiss-tnc._tcp`.
+  - Remaining acceptance criteria:
+    - Add authentication or an explicit field-mode warning before exposing any
+      sensitive settings beyond the local AP.
+    - Add firmware update support only after the core bridge path is stable.
 
 - `SB-072` Add MQTT telemetry.
   - Publish TX/RX metrics, device health, packet metadata, and future GPS
