@@ -16,11 +16,36 @@ pio device monitor --port /dev/cu.usbserial-56230391271 --baud 115200 --echo
 
 Expected:
 
-- `mode=Wi-Fi`
+- `mode=WiFi`
 - `wifi=192.168.4.1`
 - `mdns=on`
 - `radio=LINKED`
 - `radio_peer="TH-D75"`
+
+## Onboard Web Configuration
+
+Connect a phone or laptop to the Sideband Wi-Fi AP and open:
+
+```text
+http://192.168.4.1/
+```
+
+Expected:
+
+- The status card shows mode, TCP ingress, Wi-Fi client count, radio state,
+  KISS counters, and CAT diagnostic counters.
+- Radio target settings can be saved without breaking the KISS TCP service.
+- `tcp raw` / `tcp kiss` can be toggled from the web UI and reflected in the
+  serial monitor.
+- `Reset KISS`, `Reset CAT`, and `Radio test` actions produce the matching
+  serial monitor output.
+- Browser favicon requests do not produce webserver error logs.
+
+Packet applications should still use the KISS endpoint:
+
+```text
+192.168.4.1:8001
+```
 
 ## APRS Monitor Mode
 

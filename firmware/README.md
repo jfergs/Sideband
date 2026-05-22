@@ -20,6 +20,12 @@ TCP KISS transports for mobile clients.
 - Wi-Fi mode advertises the TCP KISS service over mDNS as `_kiss-tnc._tcp` on
   port `8001` with default host name `sideband.local`. The display shows the AP
   SSID and Wi-Fi password for field setup.
+- Wi-Fi mode also exposes a lightweight onboard web configuration page at
+  `http://192.168.4.1/` and advertises HTTP over mDNS. The web UI shows bridge
+  status and provides controls for radio target settings, active client mode,
+  TCP ingress mode, KISS/CAT diagnostic resets, radio link test, and restart.
+  The web UI runs separately from the KISS TCP service and does not replace
+  `192.168.4.1:8001` for packet applications.
 
 ## Safety Notes
 

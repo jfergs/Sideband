@@ -19,6 +19,11 @@ Wi-Fi discovery:
 - Manual TCP KISS endpoint: `192.168.4.1:8001`.
 - mDNS service: `_kiss-tnc._tcp`.
 - Default host name: `sideband.local`.
+- Onboard web configuration: `http://192.168.4.1/`.
+- HTTP is advertised over mDNS separately from the KISS TCP service.
+
+The web configuration page is for operator control and diagnostics only. Packet
+applications should continue to use the KISS TCP endpoint on port `8001`.
 
 ## KISS Framing Scope
 
