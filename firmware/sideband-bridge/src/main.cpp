@@ -68,6 +68,10 @@ constexpr uint32_t MODE_PREVIEW_TIMEOUT_MS = 5000;
 constexpr uint32_t RADIO_CONNECT_INTERVAL_MS = 15000;
 constexpr uint32_t RADIO_SCAN_TIMEOUT_MS = 6000;
 constexpr uint32_t RADIO_TEST_TIMEOUT_MS = 3000;
+constexpr uint32_t RADIO_RESTART_BACKOFF_MS = 60000;
+constexpr uint32_t WIFI_AP_RETRY_INTERVAL_MS = 5000;
+constexpr uint32_t WIFI_TCP_IDLE_TIMEOUT_MS = 180000;
+constexpr uint8_t RADIO_FAILURES_BEFORE_RESTART = 4;
 constexpr char SETTINGS_NAMESPACE[] = "sideband";
 constexpr char ACTIVE_MODE_KEY[] = "mode";
 constexpr char RADIO_MAC_KEY[] = "radio_mac";
@@ -105,6 +109,13 @@ enum class TcpIngressMode : uint8_t {
   Raw = 1,
 };
 
+enum class WifiApState : uint8_t {
+  Off,
+  Starting,
+  Ready,
+  Error,
+};
+
 enum class RadioTestState : uint8_t {
   Idle,
   Wait,
@@ -117,6 +128,7 @@ ClientMode selectedMode = ClientMode::Usb;
 ClientMode activeMode = ClientMode::Usb;
 uint32_t selectedModePreviewStartedMs = 0;
 TcpIngressMode tcpIngressMode = TcpIngressMode::Kiss;
+WifiApState wifiApState = WifiApState::Off;
 RadioState radioState = RadioState::Disabled;
 RadioTestState radioTestState = RadioTestState::Idle;
 String radioPeerName = "";
@@ -126,6 +138,9 @@ String radioTargetAltName = "";
 String radioTargetMac = "";
 char radioPairingCode[8] = "";
 uint32_t radioConnectAttempts = 0;
+uint32_t radioConnectFailures = 0;
+uint32_t radioTransportRestarts = 0;
+uint32_t lastRadioTransportRestartMs = 0;
 uint32_t radioReconnects = 0;
 uint32_t radioPairingEvents = 0;
 uint32_t radioTestStartedMs = 0;
@@ -134,6 +149,11 @@ uint32_t radioTestRxCount = 0;
 uint32_t radioRxByteCount = 0;
 uint32_t radioRxBufferWrites = 0;
 uint32_t radioRawCommandCount = 0;
+uint32_t wifiApStartAttempts = 0;
+uint32_t lastWifiApStartAttemptMs = 0;
+uint32_t wifiClientConnectedMs = 0;
+uint32_t wifiClientLastActivityMs = 0;
+uint32_t wifiClientStaleDisconnects = 0;
 uint32_t kissMalformedCount = 0;
 uint32_t kissClientFrameCount = 0;
 uint32_t kissClientByteCount = 0;
@@ -393,6 +413,20 @@ const char *tcpIngressModeName(TcpIngressMode mode) {
   return "?";
 }
 
+const char *wifiApStateName(WifiApState state) {
+  switch (state) {
+    case WifiApState::Off:
+      return "OFF";
+    case WifiApState::Starting:
+      return "STARTING";
+    case WifiApState::Ready:
+      return "READY";
+    case WifiApState::Error:
+      return "ERROR";
+  }
+  return "?";
+}
+
 const char *radioStateName(RadioState state) {
   switch (state) {
     case RadioState::Disabled:
@@ -460,6 +494,14 @@ void setRadioState(RadioState state) {
     return;
   }
   radioState = state;
+  displayDirty = true;
+}
+
+void setWifiApState(WifiApState state) {
+  if (wifiApState == state) {
+    return;
+  }
+  wifiApState = state;
   displayDirty = true;
 }
 
@@ -582,12 +624,16 @@ void handleWebRoot() {
   appendStatusRow(html, "Mode", modeName(activeMode));
   appendStatusRow(html, "Selected", modeName(selectedMode));
   appendStatusRow(html, "TCP", tcpIngressModeName(tcpIngressMode));
+  appendStatusRow(html, "WiFi AP", wifiApStateName(wifiApState));
   appendStatusRow(html, "IP", activeMode == ClientMode::Wifi ? WiFi.softAPIP().toString() : String("off"));
   appendStatusRow(html, "WiFi clients", String(WiFi.softAPgetStationNum()));
   appendStatusRow(html, "TCP client", (wifiClient && wifiClient.connected()) ? String("connected") : String("open"));
   appendStatusRow(html, "mDNS", mdnsStarted ? String("on") : String("off"));
   appendStatusRow(html, "Radio", radioStateName(radioState));
   appendStatusRow(html, "Peer", radioPeerName.length() > 0 ? radioPeerName : radioTargetName);
+  appendStatusRow(html, "Radio failures", String(radioConnectFailures));
+  appendStatusRow(html, "Radio restarts", String(radioTransportRestarts));
+  appendStatusRow(html, "Stale TCP drops", String(wifiClientStaleDisconnects));
   appendStatusRow(html, "KISS TX/RX", String(kissClientFrameCount) + "/" + String(kissRadioFrameCount));
   appendStatusRow(html, "CAT commands", String(catHardwareCommandCount));
   appendStatusRow(html, "CAT last", catLastHardwareCommand);
@@ -743,12 +789,48 @@ void setupRadioTransport() {
   setRadioState(radioSerialStarted ? RadioState::Idle : RadioState::Error);
 }
 
+void resetRadioTransportAfterFailures() {
+  uint32_t now = millis();
+  if (radioConnectFailures < RADIO_FAILURES_BEFORE_RESTART) {
+    return;
+  }
+  if (lastRadioTransportRestartMs != 0 && now - lastRadioTransportRestartMs < RADIO_RESTART_BACKOFF_MS) {
+    return;
+  }
+
+  if (serialDiagnosticsEnabled()) {
+    Serial.printf("SIDEBAND radio transport restart failures=%lu\n",
+                  static_cast<unsigned long>(radioConnectFailures));
+  }
+  radioSerial.disconnect();
+  radioSerial.end();
+  radioSerialStarted = false;
+  radioTransportRestarts++;
+  radioConnectFailures = 0;
+  lastRadioTransportRestartMs = now;
+  clearRadioPairingCode();
+  setRadioState(RadioState::Idle);
+}
+
+void noteRadioConnectFailure() {
+  radioConnectFailures++;
+  displayDirty = true;
+  resetRadioTransportAfterFailures();
+}
+
+void noteRadioConnectSuccess() {
+  radioConnectFailures = 0;
+  clearRadioPairingCode();
+  setRadioState(RadioState::Connected);
+}
+
 bool connectRadioFromScan() {
   setRadioState(RadioState::Scanning);
   logLine("SIDEBAND radio scan start");
   BTScanResults *results = radioSerial.discover(RADIO_SCAN_TIMEOUT_MS);
   if (results == nullptr) {
     logLine("SIDEBAND radio scan failed");
+    noteRadioConnectFailure();
     return false;
   }
 
@@ -772,13 +854,14 @@ bool connectRadioFromScan() {
     setRadioState(RadioState::Connecting);
     radioConnectAttempts++;
     if (radioSerial.connect(device->getAddress())) {
-      clearRadioPairingCode();
-      setRadioState(RadioState::Connected);
+      noteRadioConnectSuccess();
       return true;
     }
+    noteRadioConnectFailure();
   }
 
   logLine("SIDEBAND radio not found");
+  noteRadioConnectFailure();
   return false;
 }
 
@@ -814,9 +897,10 @@ void maintainRadioConnection() {
     radioPeerName = radioTargetName;
     radioPeerAddress = radioTargetMac;
     if (radioSerial.connect(BTAddress(radioTargetMac))) {
-      setRadioState(RadioState::Connected);
+      noteRadioConnectSuccess();
       return;
     }
+    noteRadioConnectFailure();
     setRadioState(RadioState::Reconnecting);
     return;
   }
@@ -827,17 +911,40 @@ void maintainRadioConnection() {
 }
 
 void setupWifiTransport() {
-  if (wifiStarted || activeMode != ClientMode::Wifi) {
+  if (activeMode != ClientMode::Wifi) {
+    setWifiApState(WifiApState::Off);
     return;
   }
+  if (wifiStarted) {
+    return;
+  }
+
+  uint32_t now = millis();
+  if (lastWifiApStartAttemptMs != 0 && now - lastWifiApStartAttemptMs < WIFI_AP_RETRY_INTERVAL_MS) {
+    return;
+  }
+  lastWifiApStartAttemptMs = now;
+  wifiApStartAttempts++;
+  setWifiApState(WifiApState::Starting);
 
   uint64_t chipId = ESP.getEfuseMac();
   char ssid[24];
   snprintf(ssid, sizeof(ssid), "Sideband-%04X", static_cast<uint16_t>(chipId & 0xffff));
   wifiApSsid = ssid;
 
+  WiFi.softAPdisconnect(true);
   WiFi.mode(WIFI_AP);
-  WiFi.softAP(wifiApSsid.c_str(), SIDEBAND_WIFI_AP_PASSWORD);
+  bool apStarted = WiFi.softAP(wifiApSsid.c_str(), SIDEBAND_WIFI_AP_PASSWORD);
+  IPAddress apIp = WiFi.softAPIP();
+  if (!apStarted || apIp == IPAddress(0, 0, 0, 0)) {
+    setWifiApState(WifiApState::Error);
+    if (serialDiagnosticsEnabled()) {
+      Serial.printf("SIDEBAND wifi ap start failed attempt=%lu\n",
+                    static_cast<unsigned long>(wifiApStartAttempts));
+    }
+    return;
+  }
+
   wifiServer.begin();
   wifiServer.setNoDelay(true);
   if (MDNS.begin(SIDEBAND_MDNS_HOSTNAME)) {
@@ -852,6 +959,14 @@ void setupWifiTransport() {
   }
   setupWebConfig();
   wifiStarted = true;
+  setWifiApState(WifiApState::Ready);
+  if (serialDiagnosticsEnabled()) {
+    Serial.printf("SIDEBAND wifi ready ssid=\"%s\" ip=%s kiss=%u http=http://%s/\n",
+                  wifiApSsid.c_str(),
+                  apIp.toString().c_str(),
+                  static_cast<unsigned>(SIDEBAND_WIFI_TCP_PORT),
+                  apIp.toString().c_str());
+  }
   displayDirty = true;
 }
 
@@ -861,7 +976,24 @@ void maintainWifiClient() {
   }
 
   if (wifiClient && wifiClient.connected()) {
+    uint32_t now = millis();
+    if (wifiClientLastActivityMs != 0 && now - wifiClientLastActivityMs > WIFI_TCP_IDLE_TIMEOUT_MS) {
+      wifiClient.stop();
+      wifiClientConnectedMs = 0;
+      wifiClientLastActivityMs = 0;
+      wifiClientStaleDisconnects++;
+      displayDirty = true;
+      logLine("SIDEBAND wifi tcp client stale disconnect");
+      return;
+    }
     return;
+  }
+
+  if (wifiClient) {
+    wifiClient.stop();
+    wifiClientConnectedMs = 0;
+    wifiClientLastActivityMs = 0;
+    displayDirty = true;
   }
 
   WiFiClient candidate = wifiServer.available();
@@ -871,6 +1003,8 @@ void maintainWifiClient() {
     }
     wifiClient = candidate;
     wifiClient.setNoDelay(true);
+    wifiClientConnectedMs = millis();
+    wifiClientLastActivityMs = wifiClientConnectedMs;
     displayDirty = true;
   }
 }
@@ -906,6 +1040,7 @@ void relayRadioToClient() {
   if (activeMode == ClientMode::Wifi) {
     if (wifiClient && wifiClient.connected()) {
       wifiClient.write(buffer, len);
+      wifiClientLastActivityMs = millis();
       radioToClientCount++;
       displayDirty = true;
     }
@@ -950,6 +1085,7 @@ void relayWifiToRadio() {
   bool rawBytesForwarded = false;
   while (wifiClient.available() > 0) {
     uint8_t value = static_cast<uint8_t>(wifiClient.read());
+    wifiClientLastActivityMs = millis();
     if (tcpIngressMode == TcpIngressMode::Raw) {
       if (radioState == RadioState::Connected && radioSerial.connected()) {
         radioSerial.write(value);
@@ -1521,13 +1657,16 @@ void printStatus() {
   lastStatusMs = now;
 
   Serial.printf(
-      "SIDEBAND status=running mode=%s selected=%s tcp=%s wifi=%s mdns=%s wifi_client=%s radio=%s radio_peer=\"%s\" pair=\"%s\" test=%s test_tx=%lu test_rx=%lu raw_cmds=%lu cat_hw=%lu pair_events=%lu attempts=%lu reconnects=%lu radio_rx_bytes=%lu radio_rx_buf=%u radio_to_client=%lu client_to_radio=%lu kiss_tx=%lu kiss_rx=%lu kiss_malformed=%lu kiss_last=%s cat_last=\"%s\"\n",
+      "SIDEBAND status=running mode=%s selected=%s tcp=%s wifi_ap=%s wifi=%s wifi_sta=%u wifi_tcp=%s wifi_tcp_stale=%lu mdns=%s radio=%s radio_peer=\"%s\" pair=\"%s\" test=%s test_tx=%lu test_rx=%lu raw_cmds=%lu cat_hw=%lu pair_events=%lu attempts=%lu failures=%lu bt_restarts=%lu reconnects=%lu radio_rx_bytes=%lu radio_rx_buf=%u radio_to_client=%lu client_to_radio=%lu kiss_tx=%lu kiss_rx=%lu kiss_malformed=%lu kiss_last=%s cat_last=\"%s\"\n",
       modeName(activeMode),
       modeName(selectedMode),
       tcpIngressModeName(tcpIngressMode),
+      wifiApStateName(wifiApState),
       activeMode == ClientMode::Wifi ? WiFi.softAPIP().toString().c_str() : "off",
+      static_cast<unsigned>(activeMode == ClientMode::Wifi ? WiFi.softAPgetStationNum() : 0),
+      activeMode == ClientMode::Wifi && wifiClient && wifiClient.connected() ? "connected" : "open",
+      static_cast<unsigned long>(wifiClientStaleDisconnects),
       mdnsStarted ? "on" : "off",
-      activeMode == ClientMode::Wifi && wifiClient && wifiClient.connected() ? "yes" : "no",
       radioStateName(radioState),
       radioPeerName.c_str(),
       radioPairingCode[0] != '\0' ? radioPairingCode : "-",
@@ -1538,6 +1677,8 @@ void printStatus() {
       static_cast<unsigned long>(catHardwareCommandCount),
       static_cast<unsigned long>(radioPairingEvents),
       static_cast<unsigned long>(radioConnectAttempts),
+      static_cast<unsigned long>(radioConnectFailures),
+      static_cast<unsigned long>(radioTransportRestarts),
       static_cast<unsigned long>(radioReconnects),
       static_cast<unsigned long>(radioRxByteCount),
       static_cast<unsigned>(radioRxBufferLength),
@@ -1566,6 +1707,7 @@ void setup() {
 
 void loop() {
   handleButtons();
+  setupWifiTransport();
   maintainRadioConnection();
   maintainRadioLinkTest();
   maintainWifiClient();

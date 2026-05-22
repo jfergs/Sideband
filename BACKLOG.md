@@ -136,6 +136,13 @@ radio design work here; roll up only cross-project dependencies to
       `radio dump` inspection or `radio replay` to a connected Wi-Fi client.
     - Wi-Fi TCP ingress can be switched between default KISS framing and raw
       pass-through with `tcp kiss` / `tcp raw`.
+    - Wi-Fi AP startup is tracked as `wifi_ap=STARTING/READY/ERROR`, retries
+      until the AP has a valid IP, and logs the SSID, KISS port, and HTTP URL
+      when ready.
+    - TCP KISS clients track activity and stale half-open clients are closed so
+      new app connections can be accepted without long waits.
+    - Repeated Bluetooth SPP reconnect failures trigger a Bluetooth transport
+      restart while leaving Wi-Fi and web configuration running.
     - `kiss stats` and `kiss reset` expose KISS frame/byte counters and the
       last parser error.
     - `scripts/kiss-exerciser.py` sends known KISS, malformed KISS, and raw TCP

@@ -17,10 +17,18 @@ pio device monitor --port /dev/cu.usbserial-56230391271 --baud 115200 --echo
 Expected:
 
 - `mode=WiFi`
+- `wifi_ap=READY`
 - `wifi=192.168.4.1`
+- `wifi_tcp=open` or `wifi_tcp=connected`
 - `mdns=on`
 - `radio=LINKED`
 - `radio_peer="TH-D75"`
+
+If Bluetooth is unavailable, expected recovery diagnostics are:
+
+- `failures` increments after failed SPP connection attempts.
+- `bt_restarts` increments after repeated failures.
+- Wi-Fi remains `wifi_ap=READY` while Bluetooth recovers.
 
 ## Onboard Web Configuration
 

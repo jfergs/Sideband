@@ -26,6 +26,11 @@ TCP KISS transports for mobile clients.
   TCP ingress mode, KISS/CAT diagnostic resets, radio link test, and restart.
   The web UI runs separately from the KISS TCP service and does not replace
   `192.168.4.1:8001` for packet applications.
+- Connection diagnostics distinguish Wi-Fi AP readiness, AP station count, TCP
+  KISS client state, stale TCP client disconnects, Bluetooth reconnect
+  failures, and Bluetooth transport restarts. Wi-Fi AP startup retries until the
+  AP has a valid IP, and repeated Bluetooth reconnect failures restart the
+  Bluetooth transport without taking down the Wi-Fi/web services.
 
 ## Safety Notes
 
