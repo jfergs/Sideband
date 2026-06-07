@@ -3,48 +3,43 @@
 Sideband firmware uses PlatformIO with the Arduino framework targeting
 original ESP32 boards with Bluetooth Classic support.
 
-## Web Flasher
+## Web Flasher — No Install Required
 
-For non-technical users: visit the GitHub Pages flasher and click
-**Flash Sideband Bridge** — no software installation required. Requires
-Chrome or Edge (WebSerial is not supported in Safari or Firefox).
+Open **[jfergs.github.io/Sideband](https://jfergs.github.io/Sideband/)** in
+Chrome or Edge, plug in your board via USB-C, and click **Flash Sideband
+Bridge**. WebSerial is not supported in Safari or Firefox.
 
-To enable the flasher page on your fork: go to repo **Settings → Pages →
-Source** and select **GitHub Actions**. The flasher deploys automatically
-when you push a `vX.Y.Z` tag.
+The flasher has two sections:
 
-The flasher also includes a **Flash a custom binary** section for boards
-not on the confirmed list. See the [Build for an unlisted board](#build-for-an-unlisted-board)
-section below for the PlatformIO + esptool merge steps that produce the
-required merged `.bin` file.
+- **Pre-built firmware** — one-click flash for the confirmed TTGO T-Display
+  V1.1 hardware.
+- **Flash a custom binary** — upload a merged `.bin` you built yourself for
+  any other original ESP32 board.
 
-## Quick Start
+To enable the flasher on your own fork: repo **Settings → Pages → Source →
+GitHub Actions**. It deploys automatically when you push a `vX.Y.Z` tag.
 
-No file editing required for a first flash. The defaults work out of the box.
+---
+
+## Quick Start — Command Line
+
+No file editing required. The defaults work out of the box.
 
 ```bash
 # 1. Install PlatformIO
 python3 -m pip install --user platformio
 
-# 2. Flash
-cd firmware/sideband-bridge
+# 2. Clone and flash
+git clone https://github.com/jfergs/Sideband
+cd Sideband/firmware/sideband-bridge
 pio run -e ttgo-t-display-ble --target upload
 ```
 
-The device boots in BLE mode and scans for a TH-D75 by name. On your iPhone,
-open APRS.fi → TNC Settings → Bluetooth TNC → select `Sideband Bridge`.
+The device boots in BLE mode and immediately starts advertising. Open your
+iOS APRS app, go to TNC or radio settings, select **Bluetooth TNC**, and
+connect to `Sideband Bridge`.
 
-To set a persistent radio MAC (faster connect, skips name scan):
-
-```bash
-pio device monitor --baud 115200
-```
-
-Then type: `radio mac AA:BB:CC:DD:EE:FF` (find the address on the TH-D75 at
-Menu 918). The device saves the MAC to NVS and restarts.
-
-The sections below cover hardware identification, all build targets, optional
-`secrets.h` config, iOS app connection, and mode switching.
+---
 
 ## Hardware
 
@@ -52,7 +47,7 @@ The sections below cover hardware identification, all build targets, optional
 (not S3). The silkscreen on the back of the PCB reads `T-Display V1.1`.
 
 The S3 variant lacks Bluetooth Classic and cannot connect to TH-D75 class
-radios over SPP.
+radios over Bluetooth SPP.
 
 Visual identification: check the chip marking on the metal-shielded module.
 Original ESP32 modules are marked `ESP32-D0WD` or `ESP32-D0WDQ6`. S3 modules
@@ -62,14 +57,14 @@ check — V1.1 boards ship with original ESP32.
 Other original ESP32 boards (WROOM, WROVER, DevKitC) also work but do not
 have the onboard TFT display.
 
-**You also need:** a USB data cable and a TH-D75 class radio with Bluetooth
-enabled.
+**You also need:** a USB-C data cable (not charge-only) and a TH-D75 class
+radio with Bluetooth enabled.
 
 ## Requirements
 
 - Python 3.10 or newer
 - PlatformIO Core (`python3 -m pip install --user platformio`)
-- USB data cable for flashing
+- USB-C data cable for flashing
 
 ## Build Targets
 
@@ -101,12 +96,13 @@ cd firmware/sideband-bridge
 pio run -e ttgo-t-display-ble --target upload
 ```
 
-The device resets automatically after flashing.
+The device resets automatically after flashing. If the upload fails, hold the
+BOOT button (GPIO0) while clicking upload to force the board into download mode.
 
 ## First Boot
 
 The device starts in **BLE mode** and immediately advertises as
-`Sideband Bridge` using the standard BLE KISS TNC service profile
+`Sideband Bridge` using the BLE KISS TNC service profile
 (`00000001-ba2a-46c9-ae49-01b0961f68bb`).
 
 Simultaneously, it attempts to connect to the radio over Bluetooth Classic
@@ -123,7 +119,8 @@ Connect a serial terminal at 115200 baud and run:
 radio mac AA:BB:CC:DD:EE:FF
 ```
 
-The device restarts and connects directly by MAC without scanning.
+The device saves the MAC and restarts. It will connect directly by MAC on
+every subsequent boot, skipping the slower name scan.
 
 To find the TH-D75 MAC: on the radio go to **Menu 918** (Bluetooth Device
 Address), or check the label inside the battery compartment.
@@ -147,18 +144,100 @@ Any iOS app that supports the BLE KISS TNC specification works:
 **APRS.fi**, **Packet Commander**, **RadioMail**, **PocketPacket**.
 
 Steps:
-1. Open the app → TNC or radio settings → Bluetooth TNC
-2. Scan for devices — `Sideband Bridge` should appear
-3. Connect — the bridge relays KISS frames between the app and the radio
+1. Open the app → TNC or radio settings → **Bluetooth TNC**
+2. Scan — `Sideband Bridge` appears in the list
+3. Tap to connect — the bridge relays KISS frames between app and radio
 
-No pairing or PIN is required. Connection parameter negotiation is handled
-automatically.
+No pairing or PIN is required. The bridge handles connection parameter
+negotiation automatically.
+
+## Testing Your Setup
+
+After flashing, work through these checks in order. Each one builds on the
+previous.
+
+**1. Board comes up**
+
+Connect a serial monitor:
+
+```bash
+pio device monitor --baud 115200
+```
+
+Within a few seconds you should see:
+
+```
+SIDEBAND ble advertising name="Sideband Bridge" mac=XX:XX:XX:XX:XX:XX ...
+SIDEBAND ble gap adv_start status=0
+```
+
+`status=0` confirms advertising started. Any non-zero value means the BLE
+stack did not start — check that you flashed `ttgo-t-display-ble`, not a
+non-BLE target.
+
+The TFT should show `MODE: BLE` and `BLE: ADVERTISING`.
+
+**2. Radio link**
+
+If your TH-D75 is on and in Bluetooth range, within 15 seconds you should see:
+
+```
+SIDEBAND radio state=Connected peer="TH-D75"
+```
+
+The tower icon on the TFT turns yellow (one side connected) and green when
+both the radio and a BLE client are linked.
+
+If the radio doesn't connect: run `radio show` to confirm the MAC or name is
+correct, and check that the TH-D75 has Bluetooth enabled (Menu 980) and KISS
+mode set to Bluetooth (Menu 982).
+
+**3. iOS app sees the bridge**
+
+Open APRS.fi (or Packet Commander / RadioMail / PocketPacket) → TNC settings
+→ Bluetooth TNC → scan. `Sideband Bridge` should appear. Tap to connect.
+
+The serial monitor will print:
+
+```
+SIDEBAND ble client connected
+```
+
+The TFT BLE line changes from `ADVERTISING` to `CONNECTED`.
+
+**4. KISS frames flow**
+
+With the radio in KISS mode and the app connected, the status counters should
+start moving. Run `status` in the serial monitor:
+
+```
+kiss_tx=N      — frames sent from app to radio (increments as app transmits)
+kiss_rx=N      — frames from radio to app (increments as radio receives)
+radio_to_client=N
+client_to_radio=N
+```
+
+If `kiss_tx` increments but `kiss_rx` stays at zero, the radio is receiving
+but not sending back — check the radio is in KISS12 mode with the correct
+band and data speed configured.
+
+**5. Confirm heap headroom**
+
+Check the heap values in the BLE advertising log line:
+
+```
+heap_free=NNNNN heap_min=NNNNN
+```
+
+`heap_free` should be above 60 KB. If it drops below 40 KB under load
+(both stacks active + active app session), flag it in SB-013.
 
 ## Mode Switching
 
 The left button (GPIO0) cycles through modes: **BLE → WiFi-AP → WiFi-STA**
 
-The right button (GPIO35) runs a radio link test.
+The right button (GPIO35) runs a radio link test and prints the result to the
+serial monitor.
 
 The active mode is saved to NVS and restored on restart.
 
@@ -168,17 +247,9 @@ The active mode is saved to NVS and restored on restart.
 pio device monitor --baud 115200
 ```
 
-The status line prints every 5 seconds and shows link state, packet
-counters, and heap. Diagnostics are suppressed in USB mode (pipe mode).
-
-## First Bring-Up Checks
-
-- TFT shows `BLE / ADVERTISING` and the radio connection state
-- Serial shows `SIDEBAND ble advertising name="Sideband Bridge" mac=XX:XX:XX:XX:XX:XX`
-- `SIDEBAND ble gap adv_start status=0` confirms advertising started
-- iOS app finds `Sideband Bridge` in Bluetooth TNC scan
-- `kiss_rx` counter increments when the iOS app sends a frame
-- `radio_to_client` counter increments when the radio sends a frame to the app
+The status line prints every 5 seconds and shows link state, packet counters,
+and heap. Diagnostics are suppressed in USB mode (the serial port becomes a
+transparent KISS pipe when USB mode is active).
 
 ## Build for an Unlisted Board
 
@@ -212,6 +283,6 @@ flasher, or flash directly without merging:
 pio run -e my-board-ble --target upload
 ```
 
-If your board uses different flash parameters, check
-`pio run -e my-board-ble -v` and match the `--flash_mode`, `--flash_freq`,
-and `--flash_size` flags to what PlatformIO reports.
+If your board uses different flash parameters, run `pio run -e my-board-ble -v`
+and match the `--flash_mode`, `--flash_freq`, and `--flash_size` flags to
+what PlatformIO reports.
