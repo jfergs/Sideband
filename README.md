@@ -23,21 +23,29 @@ or private operator identifiers by default.
 ```text
 TH-D75 class radio
   <-> Bluetooth Classic SPP
-  <-> Sideband ESP32 bridge
-  <-> USB-C serial or Wi-Fi TCP
+  <-> Sideband ESP32 bridge (original ESP32, BTDM dual-mode)
+  <-> BLE KISS TNC (primary) or Wi-Fi TCP (fallback)
   <-> iPhone or mobile packet app
+      (APRS.fi / Packet Commander / RadioMail / PocketPacket)
 ```
 
-The primary bridge requires Bluetooth Classic. ESP32-S3, ESP32-C3, and ESP32-C6
-do not support Bluetooth Classic, so they are not suitable for the first radio
-bridge. They may still be useful later as display, companion, or telemetry
-nodes when paired with a Classic-capable bridge.
+The bridge uses the original ESP32's dual Bluetooth stack (BTDM) to run
+Bluetooth Classic SPP for the radio and BLE for the phone simultaneously.
+BLE is the primary client transport. The bridge advertises the standard
+BLE KISS TNC service (`00000001-ba2a-46c9-ae49-01b0961f68bb`) so any iOS
+APRS app that supports the BLE KISS TNC specification connects directly.
+
+Wi-Fi mode (AP or STA) is the fallback client transport when BLE is not
+suitable. BLE and Wi-Fi are mutually exclusive; only one is active at a time.
+
+ESP32-S3, ESP32-C3, and ESP32-C6 do not support Bluetooth Classic and are
+not suitable for the primary bridge.
 
 ## Hardware Direction
 
 First boards to evaluate:
 
-- TTGO T-Display v1.3 original ESP32 variant.
+- TTGO T-Display V1.1 original ESP32 variant.
 - ESP32 DevKitC / ESP32-WROOM boards.
 - ESP32-WROVER boards when extra buffering or PSRAM is useful.
 
@@ -71,27 +79,27 @@ references/
 
 ## Development
 
-Install PlatformIO, then build the initial bridge scaffold:
+Install PlatformIO, then build and flash the primary target:
 
 ```bash
 cd firmware/sideband-bridge
-pio run -e esp32dev
+pio run -e ttgo-t-display-ble --target upload
 ```
 
-For TTGO T-Display v1.3 original ESP32 boards:
-
-```bash
-pio run -e ttgo-t-display
-```
+Other targets: `ttgo-t-display` (Wi-Fi only, no BLE), `esp32dev-ble` (BLE,
+no display), `esp32dev` (basic, no BLE or display).
 
 Local credentials, pairing records, callsigns, and field logs should stay out of
-the repo. If local experiments need private values, copy
-`firmware/sideband-bridge/include/sideband_config.example.h` to
-`firmware/sideband-bridge/include/secrets.h`.
+the repo. Copy `firmware/sideband-bridge/include/sideband_config.example.h`
+to `firmware/sideband-bridge/include/secrets.h` for a local config that is
+never committed.
+
+See [Developer Setup](docs/DEVELOPER_SETUP.md) for the full first-flash
+walkthrough including radio MAC configuration and iOS app connection steps.
 
 ## Status
 
-Early implementation scaffold. The current firmware initializes Bluetooth
-Classic SPP, exposes USB-C serial and Wi-Fi TCP client paths, stores radio
-target settings in Preferences, and renders the TFT status UI. KISS framing
-hardening and end-to-end TH-D75 validation remain active backlog items.
+Active development. Current firmware: BLE KISS TNC advertising (`00000001-ba2a-46c9-ae49-01b0961f68bb`),
+Bluetooth Classic SPP radio link to TH-D75, KISS relay in both directions,
+TFT instrumentation display, NVS config persistence, mode switching. End-to-end
+BLE validation with iOS APRS apps is the active test priority (SB-043).

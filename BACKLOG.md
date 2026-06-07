@@ -6,21 +6,19 @@ radio design work here; roll up only cross-project dependencies to
 
 ## Current State
 
-- Repository has moved from planning placeholder to initial implementation
-  scaffold.
-- README defines the project around the TH-D75 class Bluetooth bridge with
-  USB-C serial and Wi-Fi TCP client transports.
-- Architecture notes define Bluetooth Classic SPP, USB serial, Wi-Fi TCP KISS,
-  privacy defaults, and future expansion boundaries.
-- Repository structure, contribution files, license, hardware/protocol notes,
-  developer setup notes, and the first PlatformIO firmware scaffold are present.
-- Initial direction is a portable RF bridge and packet middleware for Kenwood
-  TH-D75 class radios.
-  - Core transport: ESP32 Bluetooth Classic SPP to radio.
-  - Client transport: USB-C serial or Wi-Fi TCP for iPhone/mobile
-    interoperability.
-  - Packet middleware: KISS framing and transparent relay.
-  - Field UI: low-refresh instrumentation display on supported ESP32 boards.
+- Working KISS bridge validated end-to-end with TH-D75 and iOS APRS apps.
+- Client transports: BLE KISS TNC (primary), Wi-Fi AP, Wi-Fi STA, USB-C serial.
+  Button cycles BLE → WiFi-AP → WiFi-STA; BLE and Wi-Fi are mutually exclusive.
+- BLE KISS TNC service (`00000001-ba2a-46c9-ae49-01b0961f68bb`) advertised from
+  `ttgo-t-display-ble` target; iOS apps APRS.fi, Packet Commander, RadioMail,
+  and PocketPacket connect directly without nRF Connect. End-to-end KISS frame
+  validation in progress (SB-043).
+- Bluetooth Classic SPP radio link and BLE client transport run simultaneously
+  on original ESP32 BTDM stack.  Advertising restart logic compensates for BLE
+  suppression during Classic BT page attempts.
+- Wi-Fi STA: credentials stored in NVS, async connect with retry, web UI +
+  serial commands for configuration, mDNS and TCP KISS on DHCP IP.
+- Onboard web UI accessible in both Wi-Fi AP and Wi-Fi STA modes.
 - Individual `SB-XXX` cards are tracked directly in this backlog.
 
 ## High Priority
@@ -79,10 +77,9 @@ radio design work here; roll up only cross-project dependencies to
   - Add Bluetooth Classic capability matrix, board recommendations, and vendor
     references from Amazon, DigiKey, and Mouser.
 
-- `SB-011` Validate TTGO T-Display v1.3 compatibility.
-  - Validate TTGO T-Display v1.3 variants, including original ESP32 versus S3
-    boards, visual identification, USB port differences, TFT driver needs, and
-    Bluetooth Classic support.
+- `SB-011` Validate TTGO T-Display V1.1 compatibility. ✓
+  - Confirmed working: TTGO T-Display V1.1 (silkscreen on PCB reverse),
+    original ESP32, 4 MB flash. BLE + Classic BT + TFT all functional.
 
 - `SB-020` Set up the PlatformIO firmware foundation.
   - Configure ESP32 board definitions for supported Bluetooth Classic boards.
@@ -165,12 +162,30 @@ radio design work here; roll up only cross-project dependencies to
   - Validate KISS frame pass-through, reconnect behavior, and iPhone adapter
     workflows.
 
-- `SB-042` Remove BLE/iOS discovery transport from the primary firmware.
-  - Drop BLE UART, HID discovery mode, NimBLE dependency, and BLE diagnostic
-    build targets from the supported path.
-  - Preserve Bluetooth Classic only for radio-side connectivity.
-  - Document BLE as deferred or unsupported unless a separate coprocessor
-    architecture is introduced.
+- `SB-043` Validate BLE KISS TNC transport end-to-end.
+  - Flash `ttgo-t-display-ble` target. ✓
+  - Verify BLE advertising visible from iPhone (confirmed via nRF Connect). ✓
+  - Device visible in APRS.fi, Packet Commander, RadioMail, PocketPacket via
+    KTS service UUID `00000001-ba2a-46c9-ae49-01b0961f68bb`. In progress.
+  - Confirm KISS frames pass in both directions; verify `kiss_rx`/`kiss_tx` counters.
+  - Confirm Classic BT radio link holds simultaneously with BLE client connected.
+  - Log heap before and after both stacks are active.
+  - If stable, update SB-013 with a go/no-go recommendation for single-device BLE.
+
+- `SB-044` Validate WiFi STA mode end-to-end.
+  - Flash `ttgo-t-display` target.  Configure STA credentials via serial or AP
+    web UI, switch mode to WiFi-STA.
+  - Confirm device connects to a WPA2 network and appears on the LAN.
+  - Confirm mDNS resolves `sideband.local` and `_kiss-tnc._tcp` is advertised.
+  - Connect an iOS APRS app to the DHCP IP on port 8001.
+  - Validate KISS TX/RX counters and reconnect after a simulated network drop.
+  - Document web UI credential workflow in FIELD_VALIDATION.md.
+
+- `SB-042` ~~Remove BLE/iOS discovery transport from the primary firmware.~~
+  **Reversed.** BLE KISS TNC (KTS profile) is now the primary client transport.
+  BLE advertising, KTS UUIDs, iOS connection parameter negotiation, and BTDM
+  coexistence logic are all implemented and advertising. See SB-043 for
+  validation status.
 
 - `SB-050` Implement KISS protocol middleware.
   - Add KISS parser and serializer support for FEND, FESC, TFEND, TFESC, packet
@@ -236,17 +251,16 @@ radio design work here; roll up only cross-project dependencies to
   - Compare USB-C battery packs, LiPo charging options, and NP-F integration.
   - Document current draw and runtime estimates for supported boards.
 
-- `SB-013` Investigate dual-radio ESP32 hardware architecture.
-  - Evaluate a dual-device design where an ESP32 with Bluetooth Classic owns
-    the radio SPP/KISS link and a second ESP32-S3-class device owns BLE,
-    display/UI, memory-heavy services, and app-facing control surfaces.
-  - Compare board-to-board transports: UART, SPI, I2C, and USB CDC.
-  - Define how Bluetooth Classic packet traffic, BLE control/discovery, CAT
-    commands, status telemetry, and firmware update workflows would be split.
-  - Assess memory pressure on the current ESP32 build versus ESP32-S3 PSRAM
-    options for UI, web configuration, logging, and future protocol services.
-  - Document whether a Bluetooth Classic-to-BLE bridge is feasible without
-    corrupting KISS timing or increasing field complexity too much.
+- `SB-013` Single-device ESP32 BLE + Classic BT — go/no-go pending SB-043.
+  - BLE KISS TNC (KTS profile) implemented on `ttgo-t-display-ble` target using
+    Arduino-ESP32 BLE stack. BTDM dual-mode: Classic BT for radio SPP,
+    BLE for client. NUS (Nordic UART Service) replaced with KTS standard UUIDs.
+  - BLE advertising confirmed visible on iPhone (nRF Connect). ✓
+  - iOS APRS app discovery via KTS UUID in progress (SB-043).
+  - Heap logging present in serial output; gate go/no-go on SB-043 result
+    with <40 KB free under both stacks as fail threshold.
+  - Dual-device fallback path (Classic ESP32 bridge + S3 BLE/display coprocessor)
+    remains the contingency if single-device heap or coexistence proves unstable.
 
 - `SB-080` Design portable enclosure.
   - Create compact field enclosure concepts with USB access, screen visibility,
@@ -256,10 +270,13 @@ radio design work here; roll up only cross-project dependencies to
   - Create cyberdeck integration concepts for rail, Velcro, magnetic, and
     field deployment mounting.
 
-- `SB-070` Add Wi-Fi TCP KISS support.
-  - Add TCP server mode, configurable port, Wi-Fi AP mode, and future Wi-Fi
-    client mode.
-  - Define multiple-client behavior and packet ownership rules.
+- `SB-070` Wi-Fi TCP KISS — done for AP and STA modes.
+  - AP mode: hotspot with fixed SSID/password, TCP KISS on port 8001.
+  - STA mode: joins saved network, DHCP IP, same TCP KISS endpoint.
+  - Multiple-client rule: single active TCP client (most-recent wins), stale
+    connections timed out after WIFI_TCP_IDLE_TIMEOUT_MS.
+  - Remaining: Wi-Fi STA field validation; credential input UX review for
+    field conditions without a laptop (serial commands or AP-mode web UI first).
 
 - `SB-071` Add onboard web configuration.
   - Provide mobile-friendly controls for Bluetooth pairing, Wi-Fi settings,

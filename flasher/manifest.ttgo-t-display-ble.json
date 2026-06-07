@@ -1,0 +1,17 @@
+{
+  "name": "Sideband Bridge — TTGO T-Display V1.1 BLE",
+  "version": "__VERSION__",
+  "new_install_prompt_erase": true,
+  "builds": [
+    {
+      "chipFamily": "ESP32",
+      "improv": false,
+      "parts": [
+        {
+          "path": "sideband-bridge-ttgo-t-display-ble.bin",
+          "offset": 0
+        }
+      ]
+    }
+  ]
+}

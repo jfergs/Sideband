@@ -1,0 +1,434 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Sideband Bridge — Firmware Installer</title>
+  <script type="module" src="https://unpkg.com/esp-web-tools@9/dist/web/install-button.js?module"></script>
+  <style>
+    :root {
+      --bg:      #0d1117;
+      --surface: #161b22;
+      --border:  #30363d;
+      --text:    #c9d1d9;
+      --accent:  #58a6ff;
+      --green:   #3fb950;
+      --amber:   #d29922;
+      --red:     #f85149;
+      --dim:     #6e7681;
+      --mono:    'JetBrains Mono', 'Fira Mono', 'Courier New', monospace;
+    }
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--mono);
+      font-size: 14px;
+      line-height: 1.65;
+      padding: 2.5rem 1rem;
+    }
+    .container { max-width: 780px; margin: 0 auto; }
+
+    header { margin-bottom: 2.5rem; }
+    header h1 {
+      font-size: 1.1rem;
+      color: var(--accent);
+      letter-spacing: 0.06em;
+      margin-bottom: 0.4rem;
+    }
+    header p { color: var(--dim); font-size: 0.85rem; }
+
+    section { margin-bottom: 3rem; }
+    h2 {
+      font-size: 0.75rem;
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+      color: var(--dim);
+      border-bottom: 1px solid var(--border);
+      padding-bottom: 0.5rem;
+      margin-bottom: 1.4rem;
+    }
+
+    /* alerts */
+    .alert {
+      padding: 0.75rem 1rem;
+      border-radius: 0 4px 4px 0;
+      font-size: 0.85rem;
+      margin-bottom: 1.4rem;
+      display: none;
+    }
+    .alert.visible { display: block; }
+    .alert-warn {
+      background: rgba(210,153,34,.1);
+      border-left: 3px solid var(--amber);
+    }
+    .alert-err {
+      background: rgba(248,81,73,.1);
+      border-left: 3px solid var(--red);
+    }
+
+    /* device cards */
+    .device-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 1.25rem 1.4rem;
+      margin-bottom: 1rem;
+    }
+    .device-card h3 { color: var(--green); font-size: 0.95rem; margin-bottom: 0.25rem; }
+    .device-meta { color: var(--dim); font-size: 0.78rem; margin-bottom: 0.9rem; }
+    .device-meta span { margin-right: 1.4rem; }
+    .badge {
+      display: inline-block;
+      background: rgba(63,185,80,.12);
+      color: var(--green);
+      border: 1px solid rgba(63,185,80,.3);
+      border-radius: 3px;
+      padding: 0.1rem 0.5rem;
+      font-size: 0.72rem;
+      margin-bottom: 1rem;
+    }
+    .hint { color: var(--dim); font-size: 0.78rem; margin-top: 0.7rem; }
+
+    /* esp-web-tools button styling */
+    esp-web-install-button {
+      --esp-tools-button-color: var(--accent);
+      --esp-tools-button-text-color: #0d1117;
+    }
+    esp-web-install-button::part(button) {
+      font-family: var(--mono);
+      font-size: 0.85rem;
+      background: var(--accent);
+      color: #0d1117;
+      border: none;
+      border-radius: 3px;
+      padding: 0.45rem 1.2rem;
+      cursor: pointer;
+      letter-spacing: 0.04em;
+      font-weight: 600;
+    }
+    esp-web-install-button::part(button):hover { opacity: 0.85; }
+
+    /* custom flash */
+    .drop-zone {
+      border: 2px dashed var(--border);
+      border-radius: 4px;
+      padding: 1.8rem 1rem;
+      text-align: center;
+      cursor: pointer;
+      margin-bottom: 1rem;
+      transition: border-color 0.15s;
+      user-select: none;
+    }
+    .drop-zone:hover,
+    .drop-zone.drag-over { border-color: var(--accent); }
+    .drop-zone-label { color: var(--dim); font-size: 0.85rem; }
+    .drop-zone-file { color: var(--green); font-size: 0.82rem; margin-top: 0.4rem; display: none; }
+    input[type="file"] { display: none; }
+
+    button {
+      font-family: var(--mono);
+      font-size: 0.85rem;
+      background: var(--accent);
+      color: #0d1117;
+      border: none;
+      border-radius: 3px;
+      padding: 0.45rem 1.2rem;
+      cursor: pointer;
+      letter-spacing: 0.04em;
+      font-weight: 600;
+    }
+    button:disabled { opacity: 0.35; cursor: not-allowed; }
+
+    .progress-wrap {
+      height: 3px;
+      background: var(--border);
+      border-radius: 2px;
+      margin-top: 0.9rem;
+      overflow: hidden;
+      display: none;
+    }
+    .progress-wrap.visible { display: block; }
+    .progress-fill {
+      height: 100%;
+      background: var(--accent);
+      width: 0%;
+      transition: width 0.08s linear;
+    }
+
+    .terminal {
+      background: #010409;
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 0.9rem 1rem;
+      height: 160px;
+      overflow-y: auto;
+      font-size: 0.78rem;
+      color: var(--dim);
+      margin-top: 0.9rem;
+      display: none;
+    }
+    .terminal.visible { display: block; }
+    .terminal .ok  { color: var(--green); }
+    .terminal .err { color: var(--red); }
+
+    /* build section */
+    pre {
+      background: #010409;
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 1rem;
+      overflow-x: auto;
+      font-size: 0.8rem;
+      color: #a5d6ff;
+      margin: 0.6rem 0 1.2rem;
+      white-space: pre;
+    }
+    code {
+      background: rgba(110,118,129,.15);
+      border-radius: 3px;
+      padding: 0.1em 0.35em;
+      font-family: var(--mono);
+      font-size: 0.85em;
+    }
+    p { margin-bottom: 0.8rem; font-size: 0.88rem; }
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+  </style>
+</head>
+<body>
+<div class="container">
+
+  <header>
+    <h1>// SIDEBAND BRIDGE &mdash; FIRMWARE INSTALLER</h1>
+    <p>Flash Sideband Bridge firmware to your ESP32 board over USB from this page.</p>
+  </header>
+
+  <div id="no-serial-warning" class="alert alert-err">
+    WebSerial is not available in this browser. Open this page in
+    <strong>Chrome</strong> or <strong>Edge</strong> on a desktop computer to
+    flash firmware. Safari and Firefox do not support WebSerial.
+  </div>
+
+  <!-- ── PRE-BUILT FIRMWARE ────────────────────────────────────────────── -->
+  <section>
+    <h2>Pre-built firmware</h2>
+
+    <div class="device-card">
+      <h3>TTGO T-Display V1.1 &mdash; BLE + Classic BT</h3>
+      <div class="device-meta">
+        <span>Chip: ESP32</span>
+        <span>Flash: 4&thinsp;MB</span>
+        <span>Display: ST7789 135&times;240</span>
+      </div>
+      <div class="badge">&#10003; Confirmed working</div><br>
+      <esp-web-install-button manifest="manifest.ttgo-t-display-ble.json">
+        <button slot="activate">Flash Sideband Bridge</button>
+      </esp-web-install-button>
+      <p class="hint">
+        Silkscreen on PCB reverse reads <code>T-Display V1.1</code>.
+        Plug in the board via USB-C before clicking Flash.
+        The installer will erase the board and write fresh firmware.
+      </p>
+    </div>
+  </section>
+
+  <!-- ── FLASH CUSTOM BINARY ───────────────────────────────────────────── -->
+  <section>
+    <h2>Flash a custom binary</h2>
+
+    <div class="alert alert-warn visible">
+      This section is for a <strong>merged binary</strong> (bootloader +
+      partition table + app combined at offset&nbsp;0x0). If you built with
+      PlatformIO and followed the merge step below, your file is ready to use
+      here.
+    </div>
+
+    <div id="drop-zone" class="drop-zone"
+         onclick="document.getElementById('bin-input').click()"
+         ondragover="dzDrag(event,true)"
+         ondragleave="dzDrag(event,false)"
+         ondrop="dzDrop(event)">
+      <div class="drop-zone-label">Click to select a .bin file &mdash; or drag and drop</div>
+      <div id="dz-filename" class="drop-zone-file"></div>
+    </div>
+    <input type="file" id="bin-input" accept=".bin" onchange="binSelected(this)">
+
+    <button id="flash-btn" disabled onclick="flashCustom()">Flash custom binary</button>
+
+    <div id="flash-progress" class="progress-wrap">
+      <div id="flash-fill" class="progress-fill"></div>
+    </div>
+    <div id="flash-terminal" class="terminal"></div>
+  </section>
+
+  <!-- ── BUILD FOR AN UNLISTED BOARD ──────────────────────────────────── -->
+  <section id="build">
+    <h2>Build for an unlisted board</h2>
+
+    <p>
+      Any original ESP32 board with Bluetooth Classic support should work.
+      ESP32-S3, C3, and C6 <strong>cannot</strong> connect to TH-D75 class
+      radios over Bluetooth SPP and are not suitable for the radio bridge.
+    </p>
+
+    <p><strong>1. Clone and install PlatformIO</strong></p>
+    <pre>git clone https://github.com/__REPO__
+cd sideband/firmware/sideband-bridge
+python3 -m pip install --user platformio esptool</pre>
+
+    <p>
+      <strong>2. Add your board target</strong> to
+      <code>firmware/sideband-bridge/platformio.ini</code>.
+      Copy the <code>[env:esp32dev-ble]</code> section and change the
+      <code>board</code> value to match your hardware. Board identifiers are
+      listed at
+      <a href="https://registry.platformio.org/platforms/platformio/espressif32/boards"
+         target="_blank" rel="noopener">registry.platformio.org</a>.
+    </p>
+
+    <p><strong>3. Build and create a merged binary</strong></p>
+    <pre>pio run -e my-board-ble
+
+# Adjust flash parameters to match your board if needed.
+# Check: pio run -e my-board-ble -v  (look for --flash_mode / --flash_freq flags)
+BOOT_APP=$(find ~/.platformio -name "boot_app0.bin" -path "*/partitions/*" | head -1)
+
+esptool.py --chip esp32 merge_bin \
+  --flash_mode qio --flash_freq 40m --flash_size 4MB \
+  -o merged.bin \
+  0x1000  .pio/build/my-board-ble/bootloader.bin \
+  0x8000  .pio/build/my-board-ble/partitions.bin \
+  0xe000  "$BOOT_APP" \
+  0x10000 .pio/build/my-board-ble/firmware.bin</pre>
+
+    <p>
+      <strong>4. Flash</strong> using the <em>Flash a custom binary</em>
+      section above &mdash; select your <code>merged.bin</code> file and
+      click Flash. Or flash directly with PlatformIO without needing the
+      merged binary:
+    </p>
+    <pre>pio run -e my-board-ble --target upload</pre>
+
+    <p>
+      See <a href="https://github.com/__REPO__/blob/main/docs/DEVELOPER_SETUP.md"
+             target="_blank" rel="noopener">DEVELOPER_SETUP.md</a>
+      for the full first-boot walkthrough, radio MAC configuration, and iOS
+      app connection steps.
+    </p>
+  </section>
+
+</div><!-- /container -->
+
+<script type="module">
+  // WebSerial availability check
+  if (!('serial' in navigator)) {
+    document.getElementById('no-serial-warning').classList.add('visible');
+  }
+
+  // ── drop zone ────────────────────────────────────────────────────────────
+  let selectedFile = null;
+
+  window.dzDrag = (e, over) => {
+    e.preventDefault();
+    document.getElementById('drop-zone').classList.toggle('drag-over', over);
+  };
+
+  window.dzDrop = (e) => {
+    e.preventDefault();
+    document.getElementById('drop-zone').classList.remove('drag-over');
+    const f = e.dataTransfer?.files?.[0];
+    if (f) setFile(f);
+  };
+
+  window.binSelected = (input) => {
+    if (input.files?.[0]) setFile(input.files[0]);
+  };
+
+  function setFile(f) {
+    selectedFile = f;
+    const el = document.getElementById('dz-filename');
+    el.textContent = f.name;
+    el.style.display = 'block';
+    document.getElementById('flash-btn').disabled = false;
+  }
+
+  // ── custom flash ─────────────────────────────────────────────────────────
+  window.flashCustom = async () => {
+    const terminal  = document.getElementById('flash-terminal');
+    const progress  = document.getElementById('flash-progress');
+    const fill      = document.getElementById('flash-fill');
+    const flashBtn  = document.getElementById('flash-btn');
+
+    terminal.classList.add('visible');
+    terminal.innerHTML = '';
+    progress.classList.add('visible');
+    fill.style.width = '0%';
+    flashBtn.disabled = true;
+
+    const log = (msg, cls) => {
+      const line = document.createElement('div');
+      if (cls) line.className = cls;
+      line.textContent = msg;
+      terminal.appendChild(line);
+      terminal.scrollTop = terminal.scrollHeight;
+    };
+
+    let transport;
+    try {
+      const { ESPLoader, Transport } = await import('https://esm.sh/esptool-js@0.4.1');
+
+      log('Requesting serial port…');
+      const port = await navigator.serial.requestPort();
+      transport = new Transport(port, true);
+
+      const esploader = new ESPLoader({
+        transport,
+        baudrate: 460800,
+        terminal: {
+          clean()           {},
+          writeLine(data)   { log(data); },
+          write(data)       { log(data); },
+        },
+      });
+
+      log('Connecting…');
+      const chip = await esploader.main();
+      log(`Connected: ${chip}`, 'ok');
+
+      log('Reading file…');
+      const buffer = await selectedFile.arrayBuffer();
+      const bytes  = new Uint8Array(buffer);
+      let binaryStr = '';
+      for (let i = 0; i < bytes.length; i++) {
+        binaryStr += String.fromCharCode(bytes[i]);
+      }
+      log(`Size: ${(bytes.length / 1024).toFixed(0)} KB`);
+
+      log('Flashing…');
+      await esploader.write_flash({
+        fileArray: [{ data: binaryStr, address: 0x0 }],
+        flash_size: 'keep',
+        erase_all:  false,
+        compress:   true,
+        reportProgress(_idx, written, total) {
+          fill.style.width = `${Math.round((written / total) * 100)}%`;
+          if (written === total) {
+            log(`Written ${(total / 1024).toFixed(0)} KB`, 'ok');
+          }
+        },
+      });
+
+      await esploader.hard_reset();
+      log('Done — board resetting.', 'ok');
+
+    } catch (err) {
+      log(`Error: ${err.message}`, 'err');
+    } finally {
+      try { await transport?.disconnect(); } catch (_) {}
+      flashBtn.disabled = false;
+    }
+  };
+</script>
+</body>
+</html>

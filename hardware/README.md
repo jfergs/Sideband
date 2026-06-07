@@ -14,9 +14,14 @@ families for the radio transport.
 | ESP32-C3 | No | Yes | No | BLE-only; not suitable for TH-D75 SPP. |
 | ESP32-C6 | No | Yes | No | BLE/Wi-Fi 6 capable, no Bluetooth Classic. |
 
-## First Boards To Evaluate
+## Confirmed Working
 
-- TTGO T-Display v1.3 original ESP32 variant.
+- **TTGO T-Display V1.1** (LilyGO, silkscreen `T-Display V1.1` on PCB reverse).
+  Original ESP32, 4 MB flash, 1.14 inch ST7789 135×240 TFT. BLE + Classic BT
+  + TFT all functional under `ttgo-t-display-ble` target.
+
+## Other Boards To Evaluate
+
 - Generic ESP32 DevKitC / ESP32-WROOM dev boards.
 - ESP32-WROVER dev boards where PSRAM or extra buffering is useful.
 
